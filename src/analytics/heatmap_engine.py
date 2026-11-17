@@ -101,7 +101,7 @@ class HeatmapEngine:
         players : list
             Objects with ``track_id``, ``pitch_xy``, and ``team`` attrs.
         team : str
-            Team identifier to filter on (e.g. ``"team_a"``).
+            Team identifier to filter on (e.g. ``"A"`` or ``"B"``).
 
         Returns
         -------

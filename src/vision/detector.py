@@ -8,8 +8,11 @@ across frames.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import supervision as sv
+from trackers import ByteTrackTracker
 from ultralytics import YOLO
 
 from src import config
@@ -47,15 +50,27 @@ class PlayerDetector:
         self.confidence: float = confidence
         self.iou: float = iou
 
-        resolved_path: str = model_path if model_path is not None else config.MODEL_PATH
+        configured = model_path if model_path is not None else config.MODEL_PATH
+        # Prefer local weights when present; otherwise fall back to a small
+        # Ultralytics model name that can be auto-downloaded for demos.
+        if Path(configured).exists():
+            resolved_path = configured
+        else:
+            resolved_path = "yolov8n.pt"
+
         try:
             self.model: YOLO = YOLO(resolved_path)
         except Exception as exc:  # pragma: no cover
             raise RuntimeError(
-                f"Failed to load YOLO model from '{resolved_path}': {exc}"
+                f"Failed to load YOLO model from '{resolved_path}' "
+                f"(configured='{configured}'): {exc}"
             ) from exc
 
-        self.tracker: sv.ByteTrack = sv.ByteTrack()
+        # supervision ≥ 0.31 moved ByteTrack into the external ``trackers`` package.
+        self.tracker = ByteTrackTracker(
+            track_activation_threshold=0.25,
+            minimum_consecutive_frames=1,
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -101,7 +116,7 @@ class PlayerDetector:
 
         # Apply ByteTrack to players for persistent IDs
         try:
-            player_detections = self.tracker.update_with_detections(player_detections)
+            player_detections = self.tracker.update(player_detections)
         except Exception:
             pass  # Fall back to un-tracked detections.
 

@@ -130,8 +130,7 @@ class FormationEngine:
             Populated with ``formation_a``, ``formation_b``,
             ``formation_lines_a`` and ``formation_lines_b``.
         """
-        # Lazy import to avoid circular dependency with models module.
-        from src.core.packet import PitchState  # type: ignore[import-untyped]
+        from src.core.packet import PitchState
 
         team_a = [p for p in players if getattr(p, "team", None) == "A"]
         team_b = [p for p in players if getattr(p, "team", None) == "B"]

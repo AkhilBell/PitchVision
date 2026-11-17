@@ -44,6 +44,19 @@ REFEREE_COLOR: tuple[int, int, int] = (0, 255, 255)
 BALL_COLOR: tuple[int, int, int] = (0, 255, 0)
 """BGR colour for ball annotations (green)."""
 
+# ── Team & object colours (RGB for Qt) ──────────────────────────────────────
+TEAM_A_COLOR_RGB: tuple[int, int, int] = (255, 120, 0)
+"""RGB colour for Team A annotations in Qt widgets."""
+
+TEAM_B_COLOR_RGB: tuple[int, int, int] = (50, 50, 255)
+"""RGB colour for Team B annotations in Qt widgets."""
+
+REFEREE_COLOR_RGB: tuple[int, int, int] = (255, 255, 0)
+"""RGB colour for referee annotations in Qt widgets."""
+
+BALL_COLOR_RGB: tuple[int, int, int] = (0, 255, 0)
+"""RGB colour for ball annotations in Qt widgets."""
+
 # ── Team & object colours (hex for Qt / Matplotlib) ─────────────────────────
 TEAM_A_COLOR_HEX: str = "#FF7800"
 """Hex colour string for Team A in the UI."""

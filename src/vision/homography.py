@@ -121,6 +121,11 @@ class HomographyTransformer:
         """Whether a homography matrix has been set."""
         return self._matrix is not None
 
+    @property
+    def matrix(self) -> np.ndarray | None:
+        """The current 3 × 3 pixel → pitch homography, or ``None``."""
+        return self._matrix
+
     # ------------------------------------------------------------------
     # Point transformations
     # ------------------------------------------------------------------
