@@ -58,8 +58,13 @@ BALL_COLOR_HEX: str = "#00FF00"
 """Hex colour string for the ball in the UI."""
 
 # ── Model & detection ───────────────────────────────────────────────────────
-MODEL_PATH: str = "models/weights/yolov8x.pt"
-"""Default path to YOLOv8 weights (relative to project root)."""
+MODEL_PATH: str = "yolov8x.pt"
+"""Default YOLO model identifier.
+
+When set to a bare filename like ``yolov8x.pt``, Ultralytics will
+auto-download the weights on first run.  For a local file, use an
+absolute or relative path (e.g. ``models/weights/yolov8x.pt``).
+"""
 
 CONFIDENCE_THRESHOLD: float = 0.3
 """Minimum detection confidence for YOLO predictions."""

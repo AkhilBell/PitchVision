@@ -1,0 +1,44 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Model weights & large binary files
+*.pt
+*.pth
+*.onnx
+*.engine
+models/weights/*
+!models/weights/.gitkeep
+
+# Sample data & exports (video files, large outputs)
+data/exports/*
+!data/exports/.gitkeep
+data/samples/*
+!data/samples/.gitkeep
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE & editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test & typing caches
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/

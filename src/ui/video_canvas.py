@@ -17,15 +17,15 @@ from PySide6.QtWidgets import QWidget
 if TYPE_CHECKING:
     from PySide6.QtGui import QPaintEvent
 
-    from src.models import FramePacket
+    from src.core.packet import FramePacket
 
 # Attempt to pull team colours from the project config; fall back to
 # sensible defaults so the module can be imported standalone.
 try:
     from src import config  # type: ignore[import-untyped]
 
-    TEAM_A_COLOR: tuple[int, int, int] = getattr(config, "TEAM_A_COLOR_BGR", (255, 50, 50))
-    TEAM_B_COLOR: tuple[int, int, int] = getattr(config, "TEAM_B_COLOR_BGR", (50, 50, 255))
+    TEAM_A_COLOR: tuple[int, int, int] = getattr(config, "TEAM_A_COLOR", (0, 120, 255))
+    TEAM_B_COLOR: tuple[int, int, int] = getattr(config, "TEAM_B_COLOR", (255, 50, 50))
 except ImportError:  # pragma: no cover
     TEAM_A_COLOR = (255, 50, 50)  # BGR red-ish
     TEAM_B_COLOR = (50, 50, 255)  # BGR blue-ish
@@ -97,7 +97,14 @@ class VideoCanvas(QWidget):
             track_id = getattr(player, "track_id", None)
             team = getattr(player, "team", None)
 
-            color = TEAM_A_COLOR if team == "team_a" else TEAM_B_COLOR
+            if team == "A":
+                color = TEAM_A_COLOR
+            elif team == "B":
+                color = TEAM_B_COLOR
+            elif team == "ref":
+                color = (0, 255, 255)  # yellow
+            else:
+                color = (180, 180, 180)  # grey for unknown
 
             # Perspective ellipse at foot position.
             if self.show_ellipses and foot_px is not None:
@@ -128,7 +135,7 @@ class VideoCanvas(QWidget):
         # -- Ball --
         ball = getattr(packet, "ball", None)
         if self.show_ball and ball is not None:
-            ball_px = getattr(ball, "pixel_xy", None) or getattr(ball, "foot_px", None)
+            ball_px = getattr(ball, "center_px", None)
             if ball_px is not None:
                 bx, by = int(ball_px[0]), int(ball_px[1])
                 # Small downward-pointing triangle marker.

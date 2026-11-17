@@ -6,6 +6,7 @@ single PySide6 ``QMainWindow`` with toolbar and status-bar controls.
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
@@ -30,12 +31,12 @@ from src.ui.video_canvas import VideoCanvas
 if TYPE_CHECKING:
     from PySide6.QtGui import QCloseEvent
 
-    from src.models import FramePacket
+    from src.core.packet import FramePacket
 
 # Pipeline worker is imported lazily so the module can be loaded even
 # when the pipeline package is not yet available.
 try:
-    from src.pipeline.pipeline_worker import PipelineWorker  # type: ignore[import-untyped]
+    from src.core.pipeline_worker import PipelineWorker  # type: ignore[import-untyped]
 except ImportError:  # pragma: no cover
     PipelineWorker = None  # type: ignore[assignment,misc]
 
@@ -65,7 +66,10 @@ class MainWindow(QMainWindow):
         # ----- Pipeline worker (created on video load) -----
         self._worker: PipelineWorker | None = None  # type: ignore[assignment]
         self._paused: bool = False
-        self._frame_count: int = 0
+
+        # ----- FPS tracking -----
+        self._fps_timestamps: list[float] = []
+        self._fps_window: int = 30  # rolling window of N frames
 
         # ----- Central widget & main layout -----
         central = QWidget()
@@ -156,7 +160,7 @@ class MainWindow(QMainWindow):
             self,
             "Select Video",
             "",
-            "Video Files (*.mp4 *.avi)",
+            "Video Files (*.mp4 *.avi *.mkv *.mov)",
         )
         if not path:
             return
@@ -173,12 +177,21 @@ class MainWindow(QMainWindow):
         # Stop any existing worker.
         if self._worker is not None:
             self._worker.stop()
+            self._worker.wait(2000)
 
         self._worker = PipelineWorker(path)
         self._worker.frame_ready.connect(self._on_frame_ready)
+        self._worker.error.connect(self._on_pipeline_error)
+        self._worker.finished.connect(self._on_pipeline_finished)
+
+        # Wire the heatmap engine into the widget.
+        if hasattr(self._worker, "heatmap_engine") and self._worker.heatmap_engine is not None:
+            self.heatmap_widget.set_engine(self._worker.heatmap_engine)
+
         self._worker.start()
         self._paused = False
-        self._frame_count = 0
+        self._fps_timestamps.clear()
+        self.statusBar().showMessage(f"Loaded: {path}")
 
     # ------------------------------------------------------------------
     # Slot: Frame Ready
@@ -186,8 +199,6 @@ class MainWindow(QMainWindow):
 
     def _on_frame_ready(self, packet: FramePacket) -> None:
         """Handle an incoming processed frame packet."""
-        self._frame_count += 1
-
         # Update child widgets.
         self.video_canvas.update_frame(packet)
         self.radar_widget.update_data(packet)
@@ -197,9 +208,16 @@ class MainWindow(QMainWindow):
             self.heatmap_widget.update_players(packet.players)
         self.heatmap_widget.update_heatmap()
 
-        # FPS display (simple frame counter; a real implementation would
-        # use a rolling-window timer).
-        self._lbl_fps.setText(f"FPS: {self._frame_count}")
+        # Rolling FPS calculation.
+        now = time.monotonic()
+        self._fps_timestamps.append(now)
+        if len(self._fps_timestamps) > self._fps_window:
+            self._fps_timestamps = self._fps_timestamps[-self._fps_window:]
+        if len(self._fps_timestamps) >= 2:
+            elapsed = self._fps_timestamps[-1] - self._fps_timestamps[0]
+            if elapsed > 0:
+                fps = (len(self._fps_timestamps) - 1) / elapsed
+                self._lbl_fps.setText(f"FPS: {fps:.1f}")
 
     # ------------------------------------------------------------------
     # Slot: Play / Pause
@@ -225,6 +243,18 @@ class MainWindow(QMainWindow):
         )
 
     # ------------------------------------------------------------------
+    # Slot: Pipeline error / finished
+    # ------------------------------------------------------------------
+
+    def _on_pipeline_error(self, message: str) -> None:
+        """Show an error dialog when the pipeline fails."""
+        QMessageBox.critical(self, "Pipeline Error", message)
+
+    def _on_pipeline_finished(self) -> None:
+        """Handle pipeline completion."""
+        self.statusBar().showMessage("Pipeline finished.")
+
+    # ------------------------------------------------------------------
     # Overrides
     # ------------------------------------------------------------------
 
@@ -232,4 +262,5 @@ class MainWindow(QMainWindow):
         """Ensure the pipeline worker is stopped before closing."""
         if self._worker is not None:
             self._worker.stop()
+            self._worker.wait(2000)
         super().closeEvent(event)

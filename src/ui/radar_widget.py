@@ -15,14 +15,21 @@ from PySide6.QtWidgets import QWidget
 if TYPE_CHECKING:
     from PySide6.QtGui import QPaintEvent
 
-    from src.models import FramePacket, PitchState
+    from src.core.packet import FramePacket, PitchState
 
 # Team colours (RGB for Qt).
 try:
     from src import config  # type: ignore[import-untyped]
 
-    _TEAM_A_RGB: tuple[int, int, int] = getattr(config, "TEAM_A_COLOR_RGB", (220, 50, 50))
-    _TEAM_B_RGB: tuple[int, int, int] = getattr(config, "TEAM_B_COLOR_RGB", (50, 80, 220))
+    _TEAM_A_HEX: str = getattr(config, "TEAM_A_COLOR_HEX", "#FF7800")
+    _TEAM_B_HEX: str = getattr(config, "TEAM_B_COLOR_HEX", "#3232FF")
+    # Convert hex to RGB tuples for Qt
+    _TEAM_A_RGB: tuple[int, int, int] = (
+        int(_TEAM_A_HEX[1:3], 16), int(_TEAM_A_HEX[3:5], 16), int(_TEAM_A_HEX[5:7], 16)
+    )
+    _TEAM_B_RGB: tuple[int, int, int] = (
+        int(_TEAM_B_HEX[1:3], 16), int(_TEAM_B_HEX[3:5], 16), int(_TEAM_B_HEX[5:7], 16)
+    )
 except ImportError:  # pragma: no cover
     _TEAM_A_RGB = (220, 50, 50)
     _TEAM_B_RGB = (50, 80, 220)
@@ -152,9 +159,9 @@ class RadarWidget(QWidget):
                 continue
             px, py = self._pitch_to_widget(pitch_xy[0], pitch_xy[1])
             team = getattr(player, "team", None)
-            if team == "team_a":
+            if team == "A":
                 color = QColor(*_TEAM_A_RGB)
-            elif team == "team_b":
+            elif team == "B":
                 color = QColor(*_TEAM_B_RGB)
             else:
                 color = QColor(200, 200, 200)

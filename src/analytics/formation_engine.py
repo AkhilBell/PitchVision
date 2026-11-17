@@ -131,10 +131,10 @@ class FormationEngine:
             ``formation_lines_a`` and ``formation_lines_b``.
         """
         # Lazy import to avoid circular dependency with models module.
-        from src.models import PitchState  # type: ignore[import-untyped]
+        from src.core.packet import PitchState  # type: ignore[import-untyped]
 
-        team_a = [p for p in players if getattr(p, "team", None) == "team_a"]
-        team_b = [p for p in players if getattr(p, "team", None) == "team_b"]
+        team_a = [p for p in players if getattr(p, "team", None) == "A"]
+        team_b = [p for p in players if getattr(p, "team", None) == "B"]
 
         form_a, lines_a = self.detect(team_a) if len(team_a) >= 3 else ("?", [])
         form_b, lines_b = self.detect(team_b) if len(team_b) >= 3 else ("?", [])
