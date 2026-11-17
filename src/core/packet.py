@@ -43,6 +43,9 @@ class PlayerState:
         homography transformation, or ``None`` if not yet computed.
     team : str
         Team label: ``"A"``, ``"B"``, ``"ref"``, or ``"unknown"``.
+    role : str
+        Role reported by the detector: ``"player"``, ``"goalkeeper"`` or
+        ``"referee"``.  Generic models report everyone as ``"player"``.
     jersey_crop : np.ndarray | None
         Cropped torso image used for team-colour classification.
     """
@@ -53,6 +56,7 @@ class PlayerState:
     foot_px: tuple[int, int]
     pitch_xy: Optional[tuple[float, float]] = None
     team: str = "unknown"
+    role: str = "player"
     jersey_crop: Optional[np.ndarray] = None
 
 

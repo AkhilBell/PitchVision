@@ -8,9 +8,10 @@ Workflow: all work is committed directly to `main` and pushed to `origin/main`. 
 
 ## Current state (17 Nov 2026)
 
-- **Load Video works** (Phase 1 done). The tracker now comes from the `trackers` package, because `sv.ByteTrack` no longer exists in supervision 0.31.
-- Checked headlessly on a synthetic clip only, not yet on real match footage: detection, tracking, team colours, radar, formation string and heatmaps all produce output with no errors.
-- **Speed is about 8 frames per second** on an Apple M3 after Phase 2 (GPU inference, no fixed sleep, throttled heatmap), up from about 3.
+- **Load Video works** (Phase 1 done) and has been run through the real Load Video path on two real 30-second broadcast clips.
+- **Detection is soccer-specific** (Phase 3 done): only players, goalkeepers and referees on the pitch are marked, each with a role, and a ball position is available in 99-100% of frames on the two test clips.
+- **Speed is about 6 frames per second** on an Apple M3 with 1080p broadcast footage. Phase 2 took the generic detector from about 3 to about 8; the separate ball search added in Phase 3 costs about 1.5.
+- **Team colours are not reliable yet**: on both test clips nearly every player is put in Team A. The cause is known and is Phase 5 work.
 - Pitch positions are not real. The video frame is simply stretched onto the pitch rectangle, so radar, formations and heatmaps are not meaningful on broadcast footage yet.
 - Export MP4 is a placeholder.
 
@@ -33,8 +34,15 @@ flowchart LR
 
 ## Before you start
 
-- [ ] Put one 15-30 second broadcast clip in `data/samples/` (gitignored). Every phase is checked against it. The open-source [roboflow/sports](https://github.com/roboflow/sports) repo links sample broadcast clips that can be used for local testing.
-- [ ] Keep several GB of disk free; later phases download additional model weights.
+- [x] Put one 15-30 second broadcast clip in `data/samples/` (gitignored). Every phase is checked against it. Two clips linked from the open-source [roboflow/sports](https://github.com/roboflow/sports) repo are used (1920 x 1080, 25 fps, 30 s each); from the project root:
+
+```bash
+curl -L "https://drive.usercontent.google.com/download?id=12TqauVZ9tLAv8kWxTTBFWtgt2hNQ4_ZF&export=download&confirm=t" -o data/samples/0bfacc_0.mp4
+curl -L "https://drive.usercontent.google.com/download?id=1vVwjW1dE1drIdd4ZSILfbCGPD4weoNiu&export=download&confirm=t" -o data/samples/121364_0.mp4
+```
+
+- [ ] Keep several GB of disk free; Phase 4 downloads another 140 MB of model weights.
+- [ ] Add a clip from a different source (another league, broadcaster or camera style). The two test clips come from the same collection the detection models were trained on, so results on them are probably better than on unseen footage.
 
 ## Phase 1 - Make Load Video work (done, 17 Nov 2026)
 
@@ -53,7 +61,7 @@ self.tracker: sv.ByteTrack = sv.ByteTrack()   # removed from supervision 0.31
 - [x] `pip install -r requirements.txt` to pick up `trackers`.
 - [x] Fix the stale project path, `MODEL_PATH` row and tracker details in `README.md`.
 - [x] Headless check through the real Load Video path on a synthetic clip: 45 of 45 frames, no errors.
-- [ ] Confirm on a real broadcast clip: player markers on the video, dots on the radar and a heatmap building. Positions will still be wrong at this point; that is Phase 4.
+- [x] Confirm on a real broadcast clip: player markers on the video, dots on the radar and a heatmap building (checked on both test clips during Phase 3). Positions are still wrong at this point; that is Phase 4.
 
 ## Phase 2 - Speed and two small bugs (done, 17 Nov 2026)
 
@@ -74,16 +82,36 @@ Measured on an Apple M3 with a synthetic 1278 x 568 clip containing 12 people (n
 
 Remaining per-frame cost is dominated by inference (76 ms) and team classification (54 ms for 10 players). Team classification is addressed in Phase 5. Real time (25-30 fps) is not reached; if it is still out of reach after Phase 4, add a "process first, then play back" mode rather than chasing speed.
 
-## Phase 3 - Soccer-specific detection
+## Phase 3 - Soccer-specific detection (done, 17 Nov 2026)
 
 Problem: the generic COCO model detects every person (crowd, coaches) and rarely finds the ball.
 
-- [ ] Evaluate a soccer-trained detector with classes ball, goalkeeper, player and referee. Candidate: the pretrained weights published with [roboflow/sports](https://github.com/roboflow/sports) (`football-player-detection.pt`, `football-ball-detection.pt`). Not yet tested here; check the licence terms before redistributing anything.
-- [ ] Add a `role` field to `PlayerState` in `src/core/packet.py` and have the detector fill it, so referees and goalkeepers come from the model instead of colour guessing.
-- [ ] Keep `BallTracker` interpolation; reject detections that jump implausibly far between frames.
-- [ ] Store weights in `models/weights/` and resolve `MODEL_PATH` relative to the project root rather than the current directory.
+- [x] Evaluate and adopt a soccer-trained detector with classes ball, goalkeeper, player and referee: the pretrained weights published with [roboflow/sports](https://github.com/roboflow/sports) (`football-player-detection.pt`, `football-ball-detection.pt`). The weights are downloaded by each user (see the README) and are not stored in this repository; check the licence terms before redistributing them.
+- [x] Add a `role` field (`player`, `goalkeeper`, `referee`) to `PlayerState` in `src/core/packet.py`, filled by the detector. Referees are coloured from the model rather than by colour guessing; goalkeepers are shown as "GK" with no team until Phase 5.
+- [x] Find the ball with the dedicated ball model. The ball is only a few pixels wide, so the model searches a 320 x 192 window at full resolution around the ball's last position, and the whole frame at high resolution (at most every 5 frames) when the ball is lost.
+- [x] Keep `BallTracker` interpolation; ignore detections further than 5% of the frame diagonal per frame from the ball's last position (the largest real movement measured was 2%).
+- [x] Store weights in `models/weights/` and resolve model paths relative to the project root rather than the current directory. If the soccer weights are missing the app falls back to a generic model and says so in the status bar.
 
-**Done when:** detections per frame roughly match the visible on-pitch people, and the share of frames with a ball position is measured.
+Measured on the two test clips (1920 x 1080, 25 fps, 750 frames each; values are clip 1 / clip 2) on an Apple M3:
+
+| | Generic `yolov8x.pt` (before) | Soccer models (after) |
+|---|---|---|
+| People marked per frame | 28.4 / 21.0, including bench staff and stewards | 21.6 / 21.4, on-pitch only |
+| of which referees | not identified | 2.7 / 1.6 |
+| of which goalkeepers | not identified | 0.3 / 0.8 |
+| Frames where the ball is detected | 8% / 4% | 94% / 92% |
+| Frames with a ball position, including filled gaps | 62% / 13% (first 150 frames only) | 99% / 100% |
+| Detection cost per frame | about 88 ms | about 128 ms (people 83, ball window 31, whole-frame ball search averaging 10-17) |
+| End-to-end frame rate in the app | 7.7 / 7.4 fps (first 150 frames) | 6.1 / 5.6 fps (first 300 frames) |
+
+The "before" people and ball-detection figures come from sampling every tenth frame; the "after" figures are from every frame through the real Load Video path. Ground truth was checked by eye on screenshots and on 12 sampled ball positions (all on the ball), not against labelled data.
+
+Findings to carry forward:
+
+- Without an explicit image size the soccer model runs at its training size of 1280, which took 283 ms per frame instead of 83 ms for about one more person per frame. `DETECTION_IMGSZ` is therefore fixed at 640.
+- Frame rate over full 30-second runs varied between 3 and 6 fps for both the old and the new detector while the machine was under memory pressure (8 GB of RAM, swap nearly full). The pipeline on its own held about 160 ms per frame for all 750 frames, so the dips are not explained by the detection code, but their cause was not pinned down.
+- Team colours are wrong on both clips (see Phase 5).
+- Roles are read frame by frame, so a track's role can flip when the model is unsure (for example between goalkeeper and player). How often this happens was not measured; Phase 5 should settle the role per track.
 
 ## Phase 4 - Automatic pitch calibration
 
@@ -105,6 +133,10 @@ self._homography.set_default_transform(w, h)   # stretches the frame onto the pi
 
 ## Phase 5 - Stable teams and player identity
 
+Found in Phase 3: on both test clips nearly every player is put in Team A (for example 14.4 in A and 2.6 in B per frame on a red-versus-green match). At broadcast size a jersey crop is only about 20 x 15 pixels and includes grass around the shoulders, so the "dominant colour" comes out grass-green for almost every player and the clusters do not separate the kits.
+
+- [ ] Fix the jersey colour feature in `src/vision/team_classifier.py` so it measures the shirt rather than the grass (for example, ignore grass-coloured pixels or use a tighter crop), and check that both test clips split roughly evenly.
+- [ ] Settle each track's role (player, goalkeeper, referee) by majority vote rather than taking it frame by frame.
 - [ ] Fit team colours once, on outfield players only, and cache the team per track ID with a majority vote instead of re-clustering every player on every frame (`src/vision/team_classifier.py`). This also improves speed.
 - [ ] Assign goalkeepers to the team whose players are nearest.
 - [ ] Heatmap dropdown: label entries with their team and remove IDs that were only seen briefly.

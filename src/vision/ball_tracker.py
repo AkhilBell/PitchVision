@@ -21,21 +21,49 @@ class BallTracker:
     last two known positions.  Beyond that threshold the ball is reported
     as lost (``center_px=None``).
 
+    While the ball is being followed, detections that are implausibly
+    far from its last position (another ball by the touchline, a white
+    boot, a penalty spot) are ignored.  Once the ball has been lost it
+    may be picked up again anywhere in the frame.
+
     Parameters
     ----------
     max_missing_frames : int
         Maximum number of consecutive frames without a detection before
         the ball is considered lost.
+    max_jump_px : float | None
+        Largest plausible ball movement per frame, in pixels.  *None*
+        disables the check.
     """
 
-    def __init__(self, max_missing_frames: int = 10) -> None:
+    _HISTORY_LENGTH: int = 2  # only the last two detections are ever used
+
+    def __init__(
+        self,
+        max_missing_frames: int = 10,
+        max_jump_px: float | None = None,
+    ) -> None:
         self.max_missing_frames: int = max_missing_frames
+        self.max_jump_px: float | None = max_jump_px
         self._history: list[tuple[int, tuple[int, int]]] = []
         self._missing_count: int = 0
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    @property
+    def is_tracking(self) -> bool:
+        """Whether the ball has been detected within the last few frames."""
+        return bool(self._history) and self._missing_count <= self.max_missing_frames
+
+    @property
+    def search_center(self) -> tuple[int, int] | None:
+        """Where to look for the ball next: its last detected position.
+
+        *None* when the ball is lost and the whole frame must be searched.
+        """
+        return self._history[-1][1] if self.is_tracking else None
 
     def update(
         self, frame_index: int, ball_detections: sv.Detections
@@ -55,31 +83,19 @@ class BallTracker:
         BallState
             Updated ball state, potentially with an interpolated position.
         """
-        if len(ball_detections) > 0:
-            # Pick the highest-confidence detection.
-            try:
-                confidences: np.ndarray = ball_detections.confidence
-                if confidences is not None and len(confidences) > 0:
-                    best_idx: int = int(np.argmax(confidences))
-                else:
-                    best_idx = 0
-            except Exception:
-                best_idx = 0
-
-            bbox: np.ndarray = ball_detections.xyxy[best_idx]  # [x1, y1, x2, y2]
-            cx: int = int((bbox[0] + bbox[2]) / 2)
-            cy: int = int((bbox[1] + bbox[3]) / 2)
-
-            self._history.append((frame_index, (cx, cy)))
+        center = self._select(frame_index, ball_detections)
+        if center is not None:
+            self._history.append((frame_index, center))
+            del self._history[: -self._HISTORY_LENGTH]
             self._missing_count = 0
 
             return BallState(
-                center_px=(cx, cy),
+                center_px=center,
                 pitch_xy=None,
                 is_interpolated=False,
             )
 
-        # No detection this frame.
+        # No usable detection this frame.
         self._missing_count += 1
 
         if self._missing_count <= self.max_missing_frames:
@@ -101,6 +117,41 @@ class BallTracker:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _select(
+        self, frame_index: int, ball_detections: sv.Detections
+    ) -> tuple[int, int] | None:
+        """Pick the most confident plausible detection for this frame.
+
+        Returns
+        -------
+        tuple[int, int] | None
+            ``(cx, cy)`` of the chosen detection, or *None* if there is no
+            detection or every one is too far from the ball's last position.
+        """
+        if len(ball_detections) == 0:
+            return None
+
+        boxes: np.ndarray = np.asarray(ball_detections.xyxy, dtype=float)
+        centers: np.ndarray = np.column_stack(
+            ((boxes[:, 0] + boxes[:, 2]) / 2, (boxes[:, 1] + boxes[:, 3]) / 2)
+        )
+        confidences = ball_detections.confidence
+        if confidences is None or len(confidences) != len(centers):
+            confidences = np.ones(len(centers))
+        confidences = np.asarray(confidences, dtype=float)
+
+        if self.max_jump_px is not None and self.is_tracking:
+            last_frame, (last_x, last_y) = self._history[-1]
+            allowed: float = self.max_jump_px * max(1, frame_index - last_frame)
+            distances = np.hypot(centers[:, 0] - last_x, centers[:, 1] - last_y)
+            plausible = distances <= allowed
+            if not plausible.any():
+                return None
+            centers, confidences = centers[plausible], confidences[plausible]
+
+        best = int(np.argmax(confidences))
+        return int(centers[best, 0]), int(centers[best, 1])
 
     def _interpolate(
         self, frame_index: int

@@ -105,6 +105,8 @@ class VideoCanvas(QWidget):
             if self.show_badges and bbox is not None and track_id is not None:
                 x1, y1, x2, y2 = (int(v) for v in bbox[:4])
                 label = str(track_id)
+                if getattr(player, "role", "player") == "goalkeeper":
+                    label += " GK"
                 (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
                 badge_x = x1
                 badge_y = max(y1 - th - 8, 0)

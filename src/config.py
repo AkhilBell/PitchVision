@@ -21,6 +21,8 @@ Rendering
 
 from __future__ import annotations
 
+from pathlib import Path
+
 # ── Pitch geometry ──────────────────────────────────────────────────────────
 PITCH_LENGTH: float = 105.0
 """Pitch length in metres (FIFA standard)."""
@@ -71,16 +73,64 @@ BALL_COLOR_HEX: str = "#00FF00"
 """Hex colour string for the ball in the UI."""
 
 # ── Model & detection ───────────────────────────────────────────────────────
-MODEL_PATH: str = "yolov8x.pt"
-"""Path to the YOLO weights file.
+PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
+"""Repository root; relative model paths are resolved against it."""
 
-A bare filename like ``yolov8x.pt`` is resolved relative to the directory
-the app is launched from.  If the file does not exist, the detector falls
-back to the small ``yolov8n.pt`` model, which Ultralytics auto-downloads.
+
+def resolve_path(path: str) -> Path:
+    """Return *path* as an absolute path, relative paths being taken from the project root."""
+    candidate = Path(path).expanduser()
+    return candidate if candidate.is_absolute() else PROJECT_ROOT / candidate
+
+
+MODEL_PATH: str = "models/weights/football-player-detection.pt"
+"""Soccer-trained YOLO weights with classes ball, goalkeeper, player, referee.
+
+Relative paths are resolved against the project root.  If the file does
+not exist, the detector falls back to ``FALLBACK_MODEL_PATH``.
+"""
+
+FALLBACK_MODEL_PATH: str = "models/weights/yolov8n.pt"
+"""Generic COCO model used when ``MODEL_PATH`` is missing.
+
+Ultralytics downloads it to this path automatically (6 MB).  It detects
+every person in the frame (crowd and staff included) and cannot tell
+referees or goalkeepers apart.
 """
 
 CONFIDENCE_THRESHOLD: float = 0.3
 """Minimum detection confidence for YOLO predictions."""
+
+DETECTION_IMGSZ: int = 640
+"""Longest side, in pixels, of the image the people model runs on.
+
+Without an explicit size the soccer model uses its training size (1280),
+which is about three times slower and finds roughly the same people.
+"""
+
+BALL_MODEL_PATH: str | None = "models/weights/football-ball-detection.pt"
+"""Dedicated ball-detection weights, or ``None`` to disable.
+
+When missing or disabled, the ball is taken from the main model instead,
+which finds it far less often.
+"""
+
+BALL_CONFIDENCE_THRESHOLD: float = 0.3
+"""Minimum confidence for detections from the dedicated ball model."""
+
+BALL_SEARCH_WINDOW: tuple[int, int] = (320, 192)
+"""(width, height) in pixels of the full-resolution window searched around
+the ball's last known position.  Both values should be multiples of 32."""
+
+BALL_FULL_SEARCH_IMGSZ: int = 1280
+"""Inference size for the whole-frame ball search used when the ball is lost."""
+
+BALL_FULL_SEARCH_INTERVAL: int = 5
+"""While the ball is lost, run the whole-frame search once every N frames."""
+
+BALL_MAX_JUMP_FRACTION: float = 0.05
+"""Largest plausible ball movement per frame, as a fraction of the frame
+diagonal.  Detections further than this from the last position are ignored."""
 
 IOU_THRESHOLD: float = 0.5
 """IoU threshold for non-maximum suppression."""

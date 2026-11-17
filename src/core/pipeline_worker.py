@@ -45,8 +45,14 @@ from src.vision.team_classifier import TeamClassifier
 logger = logging.getLogger(__name__)
 
 
-def _detections_to_players(detections: sv.Detections) -> list[PlayerState]:
-    """Convert supervision detections into :class:`PlayerState` objects."""
+def _detections_to_players(
+    detections: sv.Detections, roles: list[str] | None = None
+) -> list[PlayerState]:
+    """Convert supervision detections into :class:`PlayerState` objects.
+
+    *roles* gives the role of each detection, in the same order; when
+    omitted everyone is a ``"player"``.
+    """
     players: list[PlayerState] = []
     if len(detections) == 0:
         return players
@@ -71,6 +77,7 @@ def _detections_to_players(detections: sv.Detections) -> list[PlayerState]:
                 bbox=(x1, y1, x2, y2),
                 center_px=(cx, cy),
                 foot_px=foot,
+                role=roles[i] if roles is not None else "player",
             )
         )
     return players
@@ -124,6 +131,11 @@ class PipelineWorker(QThread):
     # ── Public API ──────────────────────────────────────────────────────
 
     @property
+    def detector_description(self) -> str:
+        """One-line summary of the detection models in use."""
+        return self._detector.description
+
+    @property
     def heatmap_engine(self) -> HeatmapEngine:
         """Shared heatmap accumulator used by the UI heatmap panel."""
         return self._heatmap_engine
@@ -175,21 +187,43 @@ class PipelineWorker(QThread):
                     break
 
                 # ── 1. Object detection + ball tracking ─────────────────
-                player_dets, ball_dets = self._detector.detect(frame)
-                players = _detections_to_players(player_dets)
+                if self._ball_tracker.max_jump_px is None:
+                    frame_h, frame_w = frame.shape[:2]
+                    self._ball_tracker.max_jump_px = (
+                        config.BALL_MAX_JUMP_FRACTION * float(np.hypot(frame_w, frame_h))
+                    )
+
+                player_dets, ball_dets = self._detector.detect(
+                    frame, ball_hint=self._ball_tracker.search_center
+                )
+                roles = self._detector.roles(player_dets)
+                players = _detections_to_players(player_dets, roles)
                 ball: Optional[BallState] = self._ball_tracker.update(
                     frame_index, ball_dets
                 )
 
                 # ── 2. Team classification ──────────────────────────────
+                # Roles reported by the detector take precedence over the
+                # jersey-colour guess.
                 if players:
                     if not self._team_classifier.is_fitted:
                         self._team_classifier.fit(frame, player_dets)
 
+                    known_roles = self._detector.provides_roles
                     for player in players:
-                        player.team = self._team_classifier.classify(
-                            frame, player.bbox
-                        )
+                        if player.role == "referee":
+                            player.team = "ref"
+                        elif player.role == "goalkeeper":
+                            # A goalkeeper's kit matches neither team, so
+                            # colour cannot say which side they are on.
+                            player.team = "unknown"
+                        else:
+                            team = self._team_classifier.classify(frame, player.bbox)
+                            if team == "ref" and known_roles:
+                                # The detector says this is a player, so the
+                                # referee colour match is wrong.
+                                team = "unknown"
+                            player.team = team
 
                 # ── 3. Homography → pitch coordinates ───────────────────
                 if not self._homography.is_calibrated:

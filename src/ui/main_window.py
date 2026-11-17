@@ -193,7 +193,9 @@ class MainWindow(QMainWindow):
         self._frame_count = 0
         self._fps_window_start = time.monotonic()
         self._fps_window_frames = 0
-        self.statusBar().showMessage(f"Loaded: {path}", 5000)
+        # Left side of the status bar: which models are analysing the video,
+        # so a missing weights file (generic fallback) is visible.
+        self.statusBar().showMessage(self._worker.detector_description)
 
     # ------------------------------------------------------------------
     # Slot: Frame Ready
@@ -241,7 +243,10 @@ class MainWindow(QMainWindow):
             self._progress.setValue(1)
         # The live heatmap is throttled, so draw the final state once.
         self.heatmap_widget.update_heatmap(force=True)
-        self.statusBar().showMessage("Playback finished", 3000)
+        if self._worker is not None:
+            self.statusBar().showMessage(
+                f"Playback finished | {self._worker.detector_description}"
+            )
 
     # ------------------------------------------------------------------
     # Slot: Play / Pause
