@@ -7,10 +7,13 @@ a simplified pitch outline.
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from PySide6.QtWidgets import QComboBox, QLabel, QVBoxLayout, QWidget
+
+from src.config import HEATMAP_REDRAW_INTERVAL_S
 
 try:
     import matplotlib
@@ -45,6 +48,7 @@ class HeatmapWidget(QWidget):
 
         self._engine: HeatmapEngine | None = None
         self._known_ids: set[int] = set()
+        self._last_redraw: float = 0.0  # time.monotonic() of the last redraw
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -105,10 +109,20 @@ class HeatmapWidget(QWidget):
         if self._combo.currentIndex() < 0 and self._combo.count() > 0:
             self._combo.setCurrentIndex(0)
 
-    def update_heatmap(self) -> None:
-        """Re-render the heatmap for the currently selected player."""
+    def update_heatmap(self, force: bool = False) -> None:
+        """Re-render the heatmap for the currently selected player.
+
+        Redrawing is comparatively expensive, so calls arriving sooner than
+        ``HEATMAP_REDRAW_INTERVAL_S`` after the previous redraw are skipped
+        unless *force* is true.
+        """
         if self._engine is None or self._ax is None or self._canvas is None:
             return
+
+        now = time.monotonic()
+        if not force and now - self._last_redraw < HEATMAP_REDRAW_INTERVAL_S:
+            return
+        self._last_redraw = now
 
         idx = self._combo.currentIndex()
         if idx < 0:
@@ -124,18 +138,19 @@ class HeatmapWidget(QWidget):
         # Draw a simplified pitch outline.
         self._draw_pitch_outline()
 
+        # y grows downward (y = 0 at the top), matching the radar widget.
         if heatmap is not None:
             self._ax.imshow(
                 heatmap.T,
-                origin="lower",
-                extent=[0, _PITCH_LENGTH, 0, _PITCH_WIDTH],
+                origin="upper",
+                extent=[0, _PITCH_LENGTH, _PITCH_WIDTH, 0],
                 cmap="hot",
                 alpha=0.7,
                 aspect="auto",
             )
 
         self._ax.set_xlim(0, _PITCH_LENGTH)
-        self._ax.set_ylim(0, _PITCH_WIDTH)
+        self._ax.set_ylim(_PITCH_WIDTH, 0)
         self._ax.set_xticks([])
         self._ax.set_yticks([])
         self._figure.tight_layout(pad=0.5)
@@ -147,7 +162,7 @@ class HeatmapWidget(QWidget):
 
     def _on_player_changed(self, index: int) -> None:
         """Handle combo-box selection change."""
-        self.update_heatmap()
+        self.update_heatmap(force=True)
 
     # ------------------------------------------------------------------
     # Drawing helpers

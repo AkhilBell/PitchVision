@@ -8,14 +8,27 @@ across frames.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
 import supervision as sv
+import torch
 from trackers import ByteTrackTracker
 from ultralytics import YOLO
 
 from src import config
+
+logger = logging.getLogger(__name__)
+
+
+def _auto_device() -> str:
+    """Return the fastest available torch device name."""
+    if torch.backends.mps.is_available():
+        return "mps"
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
 
 
 class PlayerDetector:
@@ -35,6 +48,9 @@ class PlayerDetector:
         Minimum confidence threshold for detections.
     iou : float
         IoU threshold used for non-maximum suppression.
+    device : str | None
+        Torch device for inference.  When *None*, the fastest available
+        device is used (Apple GPU, then CUDA, then CPU).
     """
 
     # COCO class indices
@@ -46,9 +62,11 @@ class PlayerDetector:
         model_path: str | None = None,
         confidence: float = 0.3,
         iou: float = 0.5,
+        device: str | None = None,
     ) -> None:
         self.confidence: float = confidence
         self.iou: float = iou
+        self.device: str = device if device is not None else _auto_device()
 
         configured = model_path if model_path is not None else config.MODEL_PATH
         # Prefer local weights when present; otherwise fall back to a small
@@ -94,16 +112,23 @@ class PlayerDetector:
             Detected sports-ball instances (no tracking).
         """
         try:
-            results = self.model(
-                frame,
-                conf=self.confidence,
-                iou=self.iou,
-                verbose=False,
-            )
+            results = self._infer(frame)
         except Exception:
-            # Return empty detections on inference failure.
-            empty = sv.Detections.empty()
-            return empty, empty
+            if self.device == "cpu":
+                # Return empty detections on inference failure.
+                empty = sv.Detections.empty()
+                return empty, empty
+            # GPU inference failed: switch to CPU for the rest of the run
+            # rather than silently producing no detections.
+            logger.warning(
+                "Inference on '%s' failed; falling back to CPU", self.device, exc_info=True
+            )
+            self.device = "cpu"
+            try:
+                results = self._infer(frame)
+            except Exception:
+                empty = sv.Detections.empty()
+                return empty, empty
 
         all_detections: sv.Detections = self._to_supervision(results)
 
@@ -125,6 +150,16 @@ class PlayerDetector:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _infer(self, frame: np.ndarray):
+        """Run the YOLO model on *frame* using the current device."""
+        return self.model(
+            frame,
+            conf=self.confidence,
+            iou=self.iou,
+            device=self.device,
+            verbose=False,
+        )
 
     @staticmethod
     def _to_supervision(results) -> sv.Detections:

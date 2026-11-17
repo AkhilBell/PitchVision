@@ -85,12 +85,21 @@ CONFIDENCE_THRESHOLD: float = 0.3
 IOU_THRESHOLD: float = 0.5
 """IoU threshold for non-maximum suppression."""
 
+DEVICE: str | None = None
+"""Torch device for YOLO inference (``"mps"``, ``"cuda"`` or ``"cpu"``).
+
+``None`` picks the fastest available: Apple GPU, then CUDA, then CPU.
+"""
+
 # ── Heatmap ─────────────────────────────────────────────────────────────────
 HEATMAP_GRID_RESOLUTION: tuple[int, int] = (105, 68)
 """(cols, rows) — one grid cell per metre of pitch surface."""
 
 HEATMAP_SIGMA: float = 2.5
 """Standard deviation for the Gaussian blur applied to the heatmap."""
+
+HEATMAP_REDRAW_INTERVAL_S: float = 0.5
+"""Minimum time between live heatmap redraws, in seconds."""
 
 # ── Formation detection ─────────────────────────────────────────────────────
 FORMATION_CLUSTERS_RANGE: range = range(2, 6)

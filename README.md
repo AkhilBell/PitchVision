@@ -186,6 +186,8 @@ All tunable parameters live in [`src/config.py`](src/config.py):
 | `MODEL_PATH` | `yolov8x.pt` | Path to YOLO weights (relative to where the app is launched) |
 | `CONFIDENCE_THRESHOLD` | `0.3` | Min detection confidence |
 | `IOU_THRESHOLD` | `0.5` | NMS IoU threshold |
+| `DEVICE` | `None` | Inference device (`"mps"`, `"cuda"`, `"cpu"`); `None` picks the fastest available |
+| `HEATMAP_REDRAW_INTERVAL_S` | `0.5` | Minimum seconds between live heatmap redraws |
 | `HEATMAP_SIGMA` | `2.5` | Gaussian blur for heatmaps |
 | `PITCH_LENGTH` | `105.0` | Pitch length in metres |
 | `PITCH_WIDTH` | `68.0` | Pitch width in metres |

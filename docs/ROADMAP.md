@@ -9,7 +9,8 @@ Workflow: all work is committed directly to `main` and pushed to `origin/main`. 
 ## Current state (17 Nov 2026)
 
 - **Load Video works** (Phase 1 done). The tracker now comes from the `trackers` package, because `sv.ByteTrack` no longer exists in supervision 0.31.
-- Checked headlessly on a synthetic 45-frame clip only, not yet on real match footage: detection, tracking, team colours, radar, formation string and heatmaps all produce output with no errors, at about 3 frames per second on CPU.
+- Checked headlessly on a synthetic clip only, not yet on real match footage: detection, tracking, team colours, radar, formation string and heatmaps all produce output with no errors.
+- **Speed is about 8 frames per second** on an Apple M3 after Phase 2 (GPU inference, no fixed sleep, throttled heatmap), up from about 3.
 - Pitch positions are not real. The video frame is simply stretched onto the pitch rectangle, so radar, formations and heatmaps are not meaningful on broadcast footage yet.
 - Export MP4 is a placeholder.
 
@@ -54,17 +55,24 @@ self.tracker: sv.ByteTrack = sv.ByteTrack()   # removed from supervision 0.31
 - [x] Headless check through the real Load Video path on a synthetic clip: 45 of 45 frames, no errors.
 - [ ] Confirm on a real broadcast clip: player markers on the video, dots on the radar and a heatmap building. Positions will still be wrong at this point; that is Phase 4.
 
-## Phase 2 - Speed and two small bugs
+## Phase 2 - Speed and two small bugs (done, 17 Nov 2026)
 
-Baseline: about 3 frames per second on CPU (synthetic clip, 12 people). Later phases add a second model, so headroom is needed first.
+- [x] Run YOLO on the Apple GPU in `src/vision/detector.py`. The device is chosen automatically (Apple GPU, then CUDA, then CPU) and can be overridden with `DEVICE` in `src/config.py`. If GPU inference fails, the detector falls back to CPU.
+- [x] Remove the fixed per-frame sleep in the worker; a frame is only held back if the previous one was shown less than one frame interval ago.
+- [x] Throttle the Matplotlib heatmap redraw to at most once every `HEATMAP_REDRAW_INTERVAL_S` (0.5 s), with an immediate redraw on player selection and at the end of the video.
+- [x] Fix the heatmap being upside down relative to the radar; both now draw y = 0 at the top.
+- [x] Show the worker's `progress` signal as a progress bar in the status bar.
 
-- [ ] Run YOLO on the Apple GPU (`device="mps"`) in `src/vision/detector.py`; measure before and after.
-- [ ] Remove the fixed per-frame sleep in the worker; only wait when processing is ahead of the video's frame rate.
-- [ ] Redraw the Matplotlib heatmap every N frames instead of every frame.
-- [ ] Fix the heatmap being upside down relative to the radar (`origin="lower"` in `src/ui/heatmap_widget.py`, while the radar draws y downward).
-- [ ] Show the worker's existing `progress` signal as a progress bar.
+Measured on an Apple M3 with a synthetic 1278 x 568 clip containing 12 people (not real match footage):
 
-**Done when:** the frame rate is measured and recorded, and a player on one touchline appears on the same side in both radar and heatmap. If real time is still out of reach after Phase 4, add a "process first, then play back" mode rather than chasing speed.
+| | Before | After |
+|---|---|---|
+| End-to-end frame rate | 3.2 fps | 8.2 fps |
+| YOLOv8x inference per frame | 190 ms (CPU) | 76 ms (Apple GPU, identical detections) |
+| Fixed sleep per frame | 40 ms | 0 ms when the pipeline is slower than the video |
+| Heatmap redraws | every frame (about 10 ms each) | at most 2 per second |
+
+Remaining per-frame cost is dominated by inference (76 ms) and team classification (54 ms for 10 players). Team classification is addressed in Phase 5. Real time (25-30 fps) is not reached; if it is still out of reach after Phase 4, add a "process first, then play back" mode rather than chasing speed.
 
 ## Phase 3 - Soccer-specific detection
 

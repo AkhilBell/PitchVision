@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QToolBar,
     QVBoxLayout,
@@ -130,6 +131,12 @@ class MainWindow(QMainWindow):
         self._chk_ball_trail.stateChanged.connect(self._sync_overlay_flags)
         status.addPermanentWidget(self._chk_ball_trail)
 
+        self._progress = QProgressBar()
+        self._progress.setFixedWidth(180)
+        self._progress.setRange(0, 1)
+        self._progress.setValue(0)
+        status.addPermanentWidget(self._progress)
+
         self._lbl_fps = QLabel("FPS: --")
         status.addPermanentWidget(self._lbl_fps)
 
@@ -174,8 +181,11 @@ class MainWindow(QMainWindow):
 
         self.heatmap_widget.set_engine(self._worker.heatmap_engine)
         self._worker.frame_ready.connect(self._on_frame_ready)
+        self._worker.progress.connect(self._on_progress)
         self._worker.error.connect(self._on_worker_error)
         self._worker.finished.connect(self._on_worker_finished)
+        self._progress.setRange(0, 1)
+        self._progress.setValue(0)
         self._worker.start()
 
         self._paused = False
@@ -210,6 +220,14 @@ class MainWindow(QMainWindow):
             self._fps_window_start = time.monotonic()
             self._fps_window_frames = 0
 
+    def _on_progress(self, frame_index: int, total_frames: int) -> None:
+        """Advance the progress bar; *frame_index* is zero-based."""
+        if total_frames > 0:
+            self._progress.setRange(0, total_frames)
+            self._progress.setValue(min(frame_index + 1, total_frames))
+        else:
+            self._progress.setRange(0, 0)  # unknown length: busy indicator
+
     def _on_worker_error(self, message: str) -> None:
         """Show pipeline errors in a dialog."""
         QMessageBox.critical(self, "Pipeline error", message)
@@ -218,6 +236,11 @@ class MainWindow(QMainWindow):
         """Reset pause UI when the worker completes."""
         self._paused = False
         self._btn_play_pause.setChecked(False)
+        if self._progress.maximum() == 0:
+            self._progress.setRange(0, 1)  # stop the busy indicator
+            self._progress.setValue(1)
+        # The live heatmap is throttled, so draw the final state once.
+        self.heatmap_widget.update_heatmap(force=True)
         self.statusBar().showMessage("Playback finished", 3000)
 
     # ------------------------------------------------------------------

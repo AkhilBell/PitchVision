@@ -20,6 +20,7 @@ error(str)
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 import numpy as np
@@ -106,6 +107,7 @@ class PipelineWorker(QThread):
             model_path=config.MODEL_PATH,
             confidence=config.CONFIDENCE_THRESHOLD,
             iou=config.IOU_THRESHOLD,
+            device=config.DEVICE,
         )
         self._ball_tracker = BallTracker()
         self._team_classifier = TeamClassifier()
@@ -153,6 +155,13 @@ class PipelineWorker(QThread):
                 total_frames,
                 props["fps"],
             )
+
+            # Playback pacing: never show frames faster than the source
+            # frame rate (capped at MAX_FPS), but add no delay when the
+            # pipeline is already slower than that.
+            target_fps = min(float(config.MAX_FPS), props["fps"] or float(config.MAX_FPS))
+            frame_interval = 1.0 / target_fps
+            next_emit_at = 0.0  # earliest time.monotonic() the next frame may be shown
 
             for frame_index, timestamp_ms, frame in frame_generator(self.video_path):
                 if not self._running:
@@ -211,14 +220,14 @@ class PipelineWorker(QThread):
                     pitch_state=pitch_state,
                     homography_matrix=homography_matrix,
                 )
+                # Hold the frame back only if the previous one was shown
+                # less than one frame interval ago.
+                delay = next_emit_at - time.monotonic()
+                if delay > 0:
+                    self.msleep(int(delay * 1000))
                 self.frame_ready.emit(packet)
                 self.progress.emit(frame_index, total_frames)
-
-                # Soft real-time pacing relative to source FPS.
-                source_fps = props["fps"] or float(config.MAX_FPS)
-                target_fps = min(float(config.MAX_FPS), source_fps)
-                if target_fps > 0:
-                    self.msleep(int(1000 / target_fps))
+                next_emit_at = time.monotonic() + frame_interval
 
         except FileNotFoundError as exc:
             self.error.emit(str(exc))
