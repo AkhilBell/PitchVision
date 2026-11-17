@@ -6,10 +6,9 @@ single PySide6 ``QMainWindow`` with toolbar and status-bar controls.
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -23,21 +22,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.core.packet import FramePacket
+from src.core.pipeline_worker import PipelineWorker
 from src.ui.heatmap_widget import HeatmapWidget
 from src.ui.radar_widget import RadarWidget
 from src.ui.video_canvas import VideoCanvas
 
 if TYPE_CHECKING:
     from PySide6.QtGui import QCloseEvent
-
-    from src.models import FramePacket
-
-# Pipeline worker is imported lazily so the module can be loaded even
-# when the pipeline package is not yet available.
-try:
-    from src.pipeline.pipeline_worker import PipelineWorker  # type: ignore[import-untyped]
-except ImportError:  # pragma: no cover
-    PipelineWorker = None  # type: ignore[assignment,misc]
 
 
 class MainWindow(QMainWindow):
@@ -63,9 +55,11 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1400, 800)
 
         # ----- Pipeline worker (created on video load) -----
-        self._worker: PipelineWorker | None = None  # type: ignore[assignment]
+        self._worker: PipelineWorker | None = None
         self._paused: bool = False
         self._frame_count: int = 0
+        self._fps_window_start: float = time.monotonic()
+        self._fps_window_frames: int = 0
 
         # ----- Central widget & main layout -----
         central = QWidget()
@@ -156,29 +150,40 @@ class MainWindow(QMainWindow):
             self,
             "Select Video",
             "",
-            "Video Files (*.mp4 *.avi)",
+            "Video Files (*.mp4 *.avi *.mov *.mkv)",
         )
         if not path:
-            return
-
-        if PipelineWorker is None:
-            QMessageBox.critical(
-                self,
-                "Missing dependency",
-                "PipelineWorker could not be imported.  "
-                "Ensure the pipeline package is installed.",
-            )
             return
 
         # Stop any existing worker.
         if self._worker is not None:
             self._worker.stop()
+            self._worker.wait(3000)
+            self._worker = None
 
-        self._worker = PipelineWorker(path)
+        try:
+            self._worker = PipelineWorker(path)
+        except Exception as exc:  # noqa: BLE001 — surface model/load failures
+            QMessageBox.critical(
+                self,
+                "Failed to start pipeline",
+                f"Could not initialise the vision pipeline:\n{exc}",
+            )
+            self._worker = None
+            return
+
+        self.heatmap_widget.set_engine(self._worker.heatmap_engine)
         self._worker.frame_ready.connect(self._on_frame_ready)
+        self._worker.error.connect(self._on_worker_error)
+        self._worker.finished.connect(self._on_worker_finished)
         self._worker.start()
+
         self._paused = False
+        self._btn_play_pause.setChecked(False)
         self._frame_count = 0
+        self._fps_window_start = time.monotonic()
+        self._fps_window_frames = 0
+        self.statusBar().showMessage(f"Loaded: {path}", 5000)
 
     # ------------------------------------------------------------------
     # Slot: Frame Ready
@@ -187,19 +192,33 @@ class MainWindow(QMainWindow):
     def _on_frame_ready(self, packet: FramePacket) -> None:
         """Handle an incoming processed frame packet."""
         self._frame_count += 1
+        self._fps_window_frames += 1
 
         # Update child widgets.
         self.video_canvas.update_frame(packet)
         self.radar_widget.update_data(packet)
 
         # Heatmap widget: feed players and refresh.
-        if hasattr(packet, "players"):
-            self.heatmap_widget.update_players(packet.players)
+        self.heatmap_widget.update_players(packet.players)
         self.heatmap_widget.update_heatmap()
 
-        # FPS display (simple frame counter; a real implementation would
-        # use a rolling-window timer).
-        self._lbl_fps.setText(f"FPS: {self._frame_count}")
+        # Rolling-window FPS estimate.
+        elapsed = time.monotonic() - self._fps_window_start
+        if elapsed >= 1.0:
+            fps = self._fps_window_frames / elapsed
+            self._lbl_fps.setText(f"FPS: {fps:.1f}")
+            self._fps_window_start = time.monotonic()
+            self._fps_window_frames = 0
+
+    def _on_worker_error(self, message: str) -> None:
+        """Show pipeline errors in a dialog."""
+        QMessageBox.critical(self, "Pipeline error", message)
+
+    def _on_worker_finished(self) -> None:
+        """Reset pause UI when the worker completes."""
+        self._paused = False
+        self._btn_play_pause.setChecked(False)
+        self.statusBar().showMessage("Playback finished", 3000)
 
     # ------------------------------------------------------------------
     # Slot: Play / Pause
@@ -208,8 +227,9 @@ class MainWindow(QMainWindow):
     def _on_play_pause(self) -> None:
         """Toggle the pipeline worker's paused state."""
         if self._worker is None:
+            self._btn_play_pause.setChecked(False)
             return
-        self._paused = not self._paused
+        self._paused = self._btn_play_pause.isChecked()
         self._worker.paused = self._paused
 
     # ------------------------------------------------------------------
@@ -232,4 +252,5 @@ class MainWindow(QMainWindow):
         """Ensure the pipeline worker is stopped before closing."""
         if self._worker is not None:
             self._worker.stop()
+            self._worker.wait(3000)
         super().closeEvent(event)

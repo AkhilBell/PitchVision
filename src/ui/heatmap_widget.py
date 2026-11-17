@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover
     Figure = None  # type: ignore[assignment,misc]
 
 if TYPE_CHECKING:
-    from src.analytics.heatmap_engine import HeatmapEngine
+    from src.analytics.heatmap_engine import HeatmapEngine  # noqa: F401
 
 # Pitch dimensions (metres).
 _PITCH_LENGTH = 105.0

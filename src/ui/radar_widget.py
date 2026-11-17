@@ -8,28 +8,21 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget
+
+from src.config import (
+    PITCH_LENGTH,
+    PITCH_WIDTH,
+    TEAM_A_COLOR_RGB,
+    TEAM_B_COLOR_RGB,
+)
 
 if TYPE_CHECKING:
     from PySide6.QtGui import QPaintEvent
 
-    from src.models import FramePacket, PitchState
-
-# Team colours (RGB for Qt).
-try:
-    from src import config  # type: ignore[import-untyped]
-
-    _TEAM_A_RGB: tuple[int, int, int] = getattr(config, "TEAM_A_COLOR_RGB", (220, 50, 50))
-    _TEAM_B_RGB: tuple[int, int, int] = getattr(config, "TEAM_B_COLOR_RGB", (50, 80, 220))
-except ImportError:  # pragma: no cover
-    _TEAM_A_RGB = (220, 50, 50)
-    _TEAM_B_RGB = (50, 80, 220)
-
-# Pitch dimensions in metres (FIFA standard).
-_PITCH_LENGTH = 105.0
-_PITCH_WIDTH = 68.0
+    from src.core.packet import FramePacket, PitchState
 
 # Widget padding in pixels.
 _PAD = 16
@@ -47,7 +40,7 @@ class RadarWidget(QWidget):
         # Data caches (updated every frame).
         self._players: list[Any] = []
         self._ball: Any | None = None
-        self._pitch_state: PitchState | None = None  # type: ignore[assignment]
+        self._pitch_state: PitchState | None = None
 
         # Overlay toggle.
         self.show_formations: bool = True
@@ -90,8 +83,8 @@ class RadarWidget(QWidget):
         """
         draw_w = self.width() - 2 * _PAD
         draw_h = self.height() - 2 * _PAD - 30  # reserve space for labels
-        px = int(_PAD + (x / _PITCH_LENGTH) * draw_w)
-        py = int(_PAD + (y / _PITCH_WIDTH) * draw_h)
+        px = int(_PAD + (x / PITCH_LENGTH) * draw_w)
+        py = int(_PAD + (y / PITCH_WIDTH) * draw_h)
         return px, py
 
     # ------------------------------------------------------------------
@@ -124,21 +117,25 @@ class RadarWidget(QWidget):
         painter.drawLine(cx, _PAD, cx, _PAD + draw_h)
 
         # Centre circle (radius ~9.15 m → fraction of pitch).
-        r_px = int(9.15 / _PITCH_LENGTH * draw_w)
+        r_px = int(9.15 / PITCH_LENGTH * draw_w)
         cy = _PAD + draw_h // 2
-        painter.drawEllipse(QPoint(cx, cy), r_px, int(r_px * draw_h / draw_w * _PITCH_LENGTH / _PITCH_WIDTH))
+        painter.drawEllipse(
+            QPoint(cx, cy),
+            r_px,
+            int(r_px * draw_h / draw_w * PITCH_LENGTH / PITCH_WIDTH),
+        )
 
         # Penalty areas (16.5 m deep, 40.3 m wide).
-        pa_depth = int(16.5 / _PITCH_LENGTH * draw_w)
-        pa_half_w = int(20.15 / _PITCH_WIDTH * draw_h)
+        pa_depth = int(16.5 / PITCH_LENGTH * draw_w)
+        pa_half_w = int(20.15 / PITCH_WIDTH * draw_h)
         # Left.
         painter.drawRect(_PAD, cy - pa_half_w, pa_depth, 2 * pa_half_w)
         # Right.
         painter.drawRect(_PAD + draw_w - pa_depth, cy - pa_half_w, pa_depth, 2 * pa_half_w)
 
         # Goal areas (5.5 m deep, 18.3 m wide).
-        ga_depth = int(5.5 / _PITCH_LENGTH * draw_w)
-        ga_half_w = int(9.15 / _PITCH_WIDTH * draw_h)
+        ga_depth = int(5.5 / PITCH_LENGTH * draw_w)
+        ga_half_w = int(9.15 / PITCH_WIDTH * draw_h)
         painter.drawRect(_PAD, cy - ga_half_w, ga_depth, 2 * ga_half_w)
         painter.drawRect(_PAD + draw_w - ga_depth, cy - ga_half_w, ga_depth, 2 * ga_half_w)
 
@@ -152,10 +149,10 @@ class RadarWidget(QWidget):
                 continue
             px, py = self._pitch_to_widget(pitch_xy[0], pitch_xy[1])
             team = getattr(player, "team", None)
-            if team == "team_a":
-                color = QColor(*_TEAM_A_RGB)
-            elif team == "team_b":
-                color = QColor(*_TEAM_B_RGB)
+            if team == "A":
+                color = QColor(*TEAM_A_COLOR_RGB)
+            elif team == "B":
+                color = QColor(*TEAM_B_COLOR_RGB)
             else:
                 color = QColor(200, 200, 200)
 
@@ -194,12 +191,12 @@ class RadarWidget(QWidget):
             self._draw_formation_lines(
                 painter,
                 getattr(self._pitch_state, "formation_lines_a", []),
-                QColor(*_TEAM_A_RGB, 120),
+                QColor(*TEAM_A_COLOR_RGB, 120),
             )
             self._draw_formation_lines(
                 painter,
                 getattr(self._pitch_state, "formation_lines_b", []),
-                QColor(*_TEAM_B_RGB, 120),
+                QColor(*TEAM_B_COLOR_RGB, 120),
             )
 
         painter.end()
@@ -232,7 +229,9 @@ class RadarWidget(QWidget):
         for line_group in formation_lines:
             if len(line_group) < 2:
                 continue
-            widget_pts = [self._pitch_to_widget(x, y) for x, y in line_group]
+            # Sort by y so formation lines draw cleanly across the pitch.
+            ordered = sorted(line_group, key=lambda pt: pt[1])
+            widget_pts = [self._pitch_to_widget(x, y) for x, y in ordered]
             for i in range(len(widget_pts) - 1):
                 painter.drawLine(
                     QPoint(*widget_pts[i]),

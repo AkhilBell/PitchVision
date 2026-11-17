@@ -22,8 +22,13 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+import numpy as np
+import supervision as sv
 from PySide6.QtCore import QThread, Signal
 
+from src import config
+from src.analytics.formation_engine import FormationEngine
+from src.analytics.heatmap_engine import HeatmapEngine
 from src.core.packet import (
     BallState,
     FramePacket,
@@ -31,37 +36,43 @@ from src.core.packet import (
     PlayerState,
 )
 from src.core.video_io import frame_generator, get_video_properties
+from src.vision.ball_tracker import BallTracker
+from src.vision.detector import PlayerDetector
+from src.vision.homography import HomographyTransformer
+from src.vision.team_classifier import TeamClassifier
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Lazy imports for pipeline stages — gracefully degrade if modules are not
-# yet implemented so that this file remains importable during early dev.
-# ---------------------------------------------------------------------------
-try:
-    from src.vision.detector import Detector  # type: ignore[import-untyped]
-except ImportError:
-    Detector = None  # type: ignore[assignment,misc]
 
-try:
-    from src.vision.team_classifier import TeamClassifier  # type: ignore[import-untyped]
-except ImportError:
-    TeamClassifier = None  # type: ignore[assignment,misc]
+def _detections_to_players(detections: sv.Detections) -> list[PlayerState]:
+    """Convert supervision detections into :class:`PlayerState` objects."""
+    players: list[PlayerState] = []
+    if len(detections) == 0:
+        return players
 
-try:
-    from src.vision.homography import HomographyEstimator  # type: ignore[import-untyped]
-except ImportError:
-    HomographyEstimator = None  # type: ignore[assignment,misc]
+    for i in range(len(detections)):
+        x1, y1, x2, y2 = (int(v) for v in detections.xyxy[i])
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
+        foot = (cx, y2)
 
-try:
-    from src.analytics.formation_engine import FormationEngine  # type: ignore[import-untyped]
-except ImportError:
-    FormationEngine = None  # type: ignore[assignment,misc]
+        if detections.tracker_id is not None:
+            track_id = int(detections.tracker_id[i])
+            # ByteTrackTracker marks unmatched detections with tracker_id == -1.
+            if track_id < 0:
+                continue
+        else:
+            track_id = i
 
-try:
-    from src.analytics.heatmap_engine import HeatmapEngine  # type: ignore[import-untyped]
-except ImportError:
-    HeatmapEngine = None  # type: ignore[assignment,misc]
+        players.append(
+            PlayerState(
+                track_id=track_id,
+                bbox=(x1, y1, x2, y2),
+                center_px=(cx, cy),
+                foot_px=foot,
+            )
+        )
+    return players
 
 
 class PipelineWorker(QThread):
@@ -82,9 +93,6 @@ class PipelineWorker(QThread):
     progress = Signal(int, int)
     """Emits ``(current_frame_index, total_frames)``."""
 
-    finished = Signal()
-    """Emitted when all frames have been processed or the worker is stopped."""
-
     error = Signal(str)
     """Emits an error description string on failure."""
 
@@ -92,18 +100,44 @@ class PipelineWorker(QThread):
         super().__init__(parent)
         self.video_path = video_path
         self._running: bool = True
+        self._paused: bool = False
 
-        # ── Instantiate pipeline stages (skip if not available) ─────────
-        self._detector = Detector() if Detector is not None else None
-        self._team_classifier = TeamClassifier() if TeamClassifier is not None else None
-        self._homography = HomographyEstimator() if HomographyEstimator is not None else None
-        self._formation_engine = FormationEngine() if FormationEngine is not None else None
-        self._heatmap_engine = HeatmapEngine() if HeatmapEngine is not None else None
+        self._detector = PlayerDetector(
+            model_path=config.MODEL_PATH,
+            confidence=config.CONFIDENCE_THRESHOLD,
+            iou=config.IOU_THRESHOLD,
+        )
+        self._ball_tracker = BallTracker()
+        self._team_classifier = TeamClassifier()
+        self._homography = HomographyTransformer(
+            pitch_length=config.PITCH_LENGTH,
+            pitch_width=config.PITCH_WIDTH,
+        )
+        self._formation_engine = FormationEngine()
+        self._heatmap_engine = HeatmapEngine(
+            grid_shape=config.HEATMAP_GRID_RESOLUTION,
+            sigma=config.HEATMAP_SIGMA,
+        )
 
     # ── Public API ──────────────────────────────────────────────────────
 
+    @property
+    def heatmap_engine(self) -> HeatmapEngine:
+        """Shared heatmap accumulator used by the UI heatmap panel."""
+        return self._heatmap_engine
+
+    @property
+    def paused(self) -> bool:
+        """Whether the worker is currently paused between frames."""
+        return self._paused
+
+    @paused.setter
+    def paused(self, value: bool) -> None:
+        self._paused = bool(value)
+
     def stop(self) -> None:
         """Request the worker to stop after the current frame."""
+        self._paused = False
         self._running = False
 
     # ── QThread entry point ─────────────────────────────────────────────
@@ -125,48 +159,47 @@ class PipelineWorker(QThread):
                     logger.info("PipelineWorker stopped at frame %d", frame_index)
                     break
 
-                # ── 1. Object detection ─────────────────────────────────
-                players: list[PlayerState] = []
-                ball: Optional[BallState] = None
+                while self._paused and self._running:
+                    self.msleep(50)
 
-                if self._detector is not None:
-                    # TODO: Call self._detector.detect(frame) and unpack
-                    #       player bounding boxes + ball position from the
-                    #       raw detections.
-                    pass
-                else:
-                    # Placeholder: no detections until detector is wired in
-                    pass
+                if not self._running:
+                    break
+
+                # ── 1. Object detection + ball tracking ─────────────────
+                player_dets, ball_dets = self._detector.detect(frame)
+                players = _detections_to_players(player_dets)
+                ball: Optional[BallState] = self._ball_tracker.update(
+                    frame_index, ball_dets
+                )
 
                 # ── 2. Team classification ──────────────────────────────
-                if self._team_classifier is not None and players:
-                    # TODO: Call self._team_classifier.classify(frame, players)
-                    #       to assign team labels ("A", "B", "ref") to each
-                    #       PlayerState based on jersey colour.
-                    pass
+                if players:
+                    if not self._team_classifier.is_fitted:
+                        self._team_classifier.fit(frame, player_dets)
+
+                    for player in players:
+                        player.team = self._team_classifier.classify(
+                            frame, player.bbox
+                        )
 
                 # ── 3. Homography → pitch coordinates ───────────────────
-                homography_matrix = None
-                if self._homography is not None:
-                    # TODO: Compute or update the homography matrix and
-                    #       project each player's foot_px → pitch_xy.
-                    #       homography_matrix = self._homography.estimate(frame)
-                    #       for p in players:
-                    #           p.pitch_xy = self._homography.transform_point(p.foot_px)
-                    #       if ball and ball.center_px:
-                    #           ball.pitch_xy = self._homography.transform_point(ball.center_px)
-                    pass
+                if not self._homography.is_calibrated:
+                    h, w = frame.shape[:2]
+                    self._homography.set_default_transform(w, h)
+
+                players = self._homography.transform_players(players)
+                if ball is not None:
+                    ball = self._homography.transform_ball(ball)
+
+                homography_matrix: Optional[np.ndarray] = self._homography.matrix
 
                 # ── 4. Formation detection ──────────────────────────────
-                pitch_state: Optional[PitchState] = None
-                if self._formation_engine is not None:
-                    # TODO: pitch_state = self._formation_engine.detect_formations(players)
-                    pass
+                pitch_state: PitchState = self._formation_engine.detect_both_teams(
+                    players
+                )
 
                 # ── 5. Heatmap accumulation ─────────────────────────────
-                if self._heatmap_engine is not None:
-                    # TODO: self._heatmap_engine.update(players)
-                    pass
+                self._heatmap_engine.update(players)
 
                 # ── 6. Package & emit ───────────────────────────────────
                 packet = FramePacket(
@@ -181,11 +214,17 @@ class PipelineWorker(QThread):
                 self.frame_ready.emit(packet)
                 self.progress.emit(frame_index, total_frames)
 
+                # Soft real-time pacing relative to source FPS.
+                source_fps = props["fps"] or float(config.MAX_FPS)
+                target_fps = min(float(config.MAX_FPS), source_fps)
+                if target_fps > 0:
+                    self.msleep(int(1000 / target_fps))
+
         except FileNotFoundError as exc:
             self.error.emit(str(exc))
         except Exception as exc:  # noqa: BLE001 — catch-all for the thread
             logger.exception("PipelineWorker encountered an error")
             self.error.emit(f"Pipeline error: {exc}")
         finally:
-            self.finished.emit()
+            # QThread emits its built-in ``finished`` signal when run() returns.
             logger.info("PipelineWorker finished")

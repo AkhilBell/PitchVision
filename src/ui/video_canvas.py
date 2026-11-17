@@ -14,21 +14,17 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QWidget
 
+from src.config import (
+    BALL_COLOR,
+    REFEREE_COLOR,
+    TEAM_A_COLOR,
+    TEAM_B_COLOR,
+)
+
 if TYPE_CHECKING:
     from PySide6.QtGui import QPaintEvent
 
-    from src.models import FramePacket
-
-# Attempt to pull team colours from the project config; fall back to
-# sensible defaults so the module can be imported standalone.
-try:
-    from src import config  # type: ignore[import-untyped]
-
-    TEAM_A_COLOR: tuple[int, int, int] = getattr(config, "TEAM_A_COLOR_BGR", (255, 50, 50))
-    TEAM_B_COLOR: tuple[int, int, int] = getattr(config, "TEAM_B_COLOR_BGR", (50, 50, 255))
-except ImportError:  # pragma: no cover
-    TEAM_A_COLOR = (255, 50, 50)  # BGR red-ish
-    TEAM_B_COLOR = (50, 50, 255)  # BGR blue-ish
+    from src.core.packet import FramePacket
 
 
 class VideoCanvas(QWidget):
@@ -96,8 +92,7 @@ class VideoCanvas(QWidget):
             bbox = getattr(player, "bbox", None)
             track_id = getattr(player, "track_id", None)
             team = getattr(player, "team", None)
-
-            color = TEAM_A_COLOR if team == "team_a" else TEAM_B_COLOR
+            color = self._team_color(team)
 
             # Perspective ellipse at foot position.
             if self.show_ellipses and foot_px is not None:
@@ -113,7 +108,13 @@ class VideoCanvas(QWidget):
                 (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
                 badge_x = x1
                 badge_y = max(y1 - th - 8, 0)
-                cv2.rectangle(vis, (badge_x, badge_y), (badge_x + tw + 6, badge_y + th + 6), color, -1)
+                cv2.rectangle(
+                    vis,
+                    (badge_x, badge_y),
+                    (badge_x + tw + 6, badge_y + th + 6),
+                    color,
+                    -1,
+                )
                 cv2.putText(
                     vis,
                     label,
@@ -128,7 +129,7 @@ class VideoCanvas(QWidget):
         # -- Ball --
         ball = getattr(packet, "ball", None)
         if self.show_ball and ball is not None:
-            ball_px = getattr(ball, "pixel_xy", None) or getattr(ball, "foot_px", None)
+            ball_px = getattr(ball, "center_px", None)
             if ball_px is not None:
                 bx, by = int(ball_px[0]), int(ball_px[1])
                 # Small downward-pointing triangle marker.
@@ -136,10 +137,21 @@ class VideoCanvas(QWidget):
                     [[bx, by - 14], [bx - 7, by - 22], [bx + 7, by - 22]],
                     dtype=np.int32,
                 )
-                cv2.fillPoly(vis, [tri_pts], (0, 255, 0))
+                cv2.fillPoly(vis, [tri_pts], BALL_COLOR)
                 cv2.polylines(vis, [tri_pts], True, (255, 255, 255), 1, cv2.LINE_AA)
 
         return vis
+
+    @staticmethod
+    def _team_color(team: str | None) -> tuple[int, int, int]:
+        """Return the BGR colour for a team label."""
+        if team == "A":
+            return TEAM_A_COLOR
+        if team == "B":
+            return TEAM_B_COLOR
+        if team == "ref":
+            return REFEREE_COLOR
+        return (180, 180, 180)
 
     # ------------------------------------------------------------------
     # Conversion helpers
@@ -161,7 +173,8 @@ class VideoCanvas(QWidget):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         bytes_per_line = ch * w
-        q_image = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        # Copy so the QImage owns its buffer after rgb goes out of scope.
+        q_image = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
         return QPixmap.fromImage(q_image)
 
     # ------------------------------------------------------------------
