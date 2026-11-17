@@ -8,8 +8,8 @@ Workflow: all work is committed directly to `main` and pushed to `origin/main`. 
 
 ## Current state (17 Nov 2026)
 
-- The window launches, but **Load Video fails**: `sv.ByteTrack` no longer exists in supervision 0.31, so the player tracker cannot be created. The fix is already on `origin/main` (it switches to the `trackers` package).
-- With a stand-in tracker, the rest of the pipeline runs end to end on a synthetic clip: detection, team colours, radar, formation string and heatmaps all produce output, at about 4 frames per second on CPU.
+- **Load Video works** (Phase 1 done). The tracker now comes from the `trackers` package, because `sv.ByteTrack` no longer exists in supervision 0.31.
+- Checked headlessly on a synthetic 45-frame clip only, not yet on real match footage: detection, tracking, team colours, radar, formation string and heatmaps all produce output with no errors, at about 3 frames per second on CPU.
 - Pitch positions are not real. The video frame is simply stretched onto the pitch rectangle, so radar, formations and heatmaps are not meaningful on broadcast footage yet.
 - Export MP4 is a placeholder.
 
@@ -35,28 +35,28 @@ flowchart LR
 - [ ] Put one 15-30 second broadcast clip in `data/samples/` (gitignored). Every phase is checked against it. The open-source [roboflow/sports](https://github.com/roboflow/sports) repo links sample broadcast clips that can be used for local testing.
 - [ ] Keep several GB of disk free; later phases download additional model weights.
 
-## Phase 1 - Make Load Video work
+## Phase 1 - Make Load Video work (done, 17 Nov 2026)
 
-Root cause, in [src/vision/detector.py](../src/vision/detector.py):
+Root cause, in the old [src/vision/detector.py](../src/vision/detector.py):
 
 ```python
 self.tracker: sv.ByteTrack = sv.ByteTrack()   # removed from supervision 0.31
 ```
 
-- [ ] Commit the uncommitted local wiring changes on `main`, so they are preserved in history before the merge.
-- [ ] Merge `origin/main` into `main`. The local changes and the GitHub commit are two attempts at the same wiring fix; resolve the conflicts as follows:
+- [x] Commit the uncommitted local wiring changes on `main`, so they are preserved in history before the merge.
+- [x] Merge `origin/main` into `main`. The local changes and the GitHub commit were two attempts at the same wiring fix; conflicts were resolved as follows:
   - GitHub side for `src/core/pipeline_worker.py`, `src/ui/main_window.py`, `src/ui/radar_widget.py`, `src/ui/video_canvas.py`, `src/analytics/formation_engine.py` (tracker fix, start-up error dialog, image-buffer fix).
   - Local side for `.gitignore` (superset).
-  - Keep local-only `README.md`, `src/__main__.py` and `MODEL_PATH = "yolov8x.pt"`.
-  - Drop the local "re-fit team colours every 300 frames" logic; it can swap Team A and Team B mid-video because labels are assigned by cluster size.
-- [ ] `pip install -r requirements.txt` to pick up `trackers`.
-- [ ] Fix the stale project path and `MODEL_PATH` row in `README.md`.
-
-**Done when:** loading the test clip shows player markers on the video, dots on the radar and a heatmap building. Positions are still wrong at this point; that is Phase 4.
+  - Kept local-only `README.md`, `src/__main__.py` and `MODEL_PATH = "yolov8x.pt"`.
+  - Dropped the local "re-fit team colours every 300 frames" logic; it could swap Team A and Team B mid-video because labels are assigned by cluster size.
+- [x] `pip install -r requirements.txt` to pick up `trackers`.
+- [x] Fix the stale project path, `MODEL_PATH` row and tracker details in `README.md`.
+- [x] Headless check through the real Load Video path on a synthetic clip: 45 of 45 frames, no errors.
+- [ ] Confirm on a real broadcast clip: player markers on the video, dots on the radar and a heatmap building. Positions will still be wrong at this point; that is Phase 4.
 
 ## Phase 2 - Speed and two small bugs
 
-Baseline: about 4 frames per second on CPU. Later phases add a second model, so headroom is needed first.
+Baseline: about 3 frames per second on CPU (synthetic clip, 12 people). Later phases add a second model, so headroom is needed first.
 
 - [ ] Run YOLO on the Apple GPU (`device="mps"`) in `src/vision/detector.py`; measure before and after.
 - [ ] Remove the fixed per-frame sleep in the worker; only wait when processing is ahead of the video's frame rate.

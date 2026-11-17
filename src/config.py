@@ -72,11 +72,11 @@ BALL_COLOR_HEX: str = "#00FF00"
 
 # ── Model & detection ───────────────────────────────────────────────────────
 MODEL_PATH: str = "yolov8x.pt"
-"""Default YOLO model identifier.
+"""Path to the YOLO weights file.
 
-When set to a bare filename like ``yolov8x.pt``, Ultralytics will
-auto-download the weights on first run.  For a local file, use an
-absolute or relative path (e.g. ``models/weights/yolov8x.pt``).
+A bare filename like ``yolov8x.pt`` is resolved relative to the directory
+the app is launched from.  If the file does not exist, the detector falls
+back to the small ``yolov8n.pt`` model, which Ultralytics auto-downloads.
 """
 
 CONFIDENCE_THRESHOLD: float = 0.3

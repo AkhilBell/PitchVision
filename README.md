@@ -22,7 +22,8 @@ PitchVision is a desktop computer vision application that ingests broadcast or t
 ### 1. Clone & enter the project
 
 ```bash
-cd ~/Desktop/pitchvision/PitchVision
+git clone https://github.com/AkhilBell/PitchVision.git
+cd PitchVision
 ```
 
 ### 2. Create and activate the virtual environment
@@ -39,18 +40,18 @@ source venv/bin/activate        # macOS / Linux
 pip install -r requirements.txt
 ```
 
-This installs: `ultralytics`, `supervision`, `opencv-python`, `PySide6`, `scikit-learn`, `scipy`, `numpy`, `matplotlib`, `mplsoccer`.
+This installs: `ultralytics`, `supervision`, `trackers`, `opencv-python`, `PySide6`, `scikit-learn`, `scipy`, `numpy`, `matplotlib`, `mplsoccer`.
 
 ### 4. Download YOLO weights
 
-The detector uses a YOLOv8 model. The first time you run the app, Ultralytics will **auto-download** `yolov8x.pt` (~130 MB) if it's not found locally. To pre-download:
+The detector uses a YOLOv8 model and looks for `yolov8x.pt` (~130 MB) in the project root. Download it once, from the project root:
 
 ```bash
 source venv/bin/activate
 python3 -c "from ultralytics import YOLO; YOLO('yolov8x.pt')"
 ```
 
-The weights file will be cached by Ultralytics in its default directory. Alternatively, you can place a weights file manually in `models/weights/` and update `MODEL_PATH` in `src/config.py`.
+If `yolov8x.pt` is not found, the app falls back to the much smaller (and less accurate) `yolov8n.pt`, which Ultralytics downloads automatically. To use a different weights file, update `MODEL_PATH` in `src/config.py`.
 
 ### 5. Launch the application
 
@@ -132,7 +133,7 @@ When you load a video, a background thread processes each frame through these st
 1. **YOLO Detection** — Detects all people (class 0) and sports balls (class 32) in each frame
 2. **ByteTrack Tracking** — Assigns persistent IDs to players across frames so the same player keeps the same number
 3. **Ball Tracking** — Picks the highest-confidence ball detection; fills short gaps with linear interpolation
-4. **Team Classification** — Extracts jersey crops, clusters dominant colors with K-Means to separate Team A / Team B / Referees (auto-fits after 30 frames)
+4. **Team Classification** — Extracts jersey crops, clusters dominant colors with K-Means to separate Team A / Team B / Referees (fits once, on the first frame with enough players)
 5. **Homography Transform** — Maps pixel positions to real-world pitch coordinates (105×68 m)
 6. **Formation Detection** — Clusters outfield players by position along the pitch to identify tactical shapes (4-3-3, 4-4-2, etc.)
 7. **Heatmap Accumulation** — Increments a per-player 2D grid for spatial density visualization
@@ -182,7 +183,7 @@ All tunable parameters live in [`src/config.py`](src/config.py):
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `MODEL_PATH` | `models/weights/yolov8x.pt` | Path to YOLO weights |
+| `MODEL_PATH` | `yolov8x.pt` | Path to YOLO weights (relative to where the app is launched) |
 | `CONFIDENCE_THRESHOLD` | `0.3` | Min detection confidence |
 | `IOU_THRESHOLD` | `0.5` | NMS IoU threshold |
 | `HEATMAP_SIGMA` | `2.5` | Gaussian blur for heatmaps |
@@ -197,8 +198,8 @@ All tunable parameters live in [`src/config.py`](src/config.py):
 - **Use broadcast footage** with a wide-angle view of the pitch for best detection coverage
 - **15–30 second clips** are ideal for initial testing
 - **Tactical cam (top-down)** video produces much better homography and formation accuracy than broadcast angle
-- The team classifier needs **at least 3 visible players** to fit — it auto-fits at frame 30 and re-fits every 300 frames
-- Formation detection needs **≥ 6 players with valid pitch positions** (3+ per team)
+- The team classifier needs **at least 3 visible players** to fit — it fits once, on the first frame that has enough players
+- Formation detection needs **at least 3 players per team** with valid pitch positions
 
 ---
 
@@ -219,7 +220,8 @@ All tunable parameters live in [`src/config.py`](src/config.py):
 | Library | Role |
 |---------|------|
 | **Ultralytics** | YOLOv8 object detection |
-| **Supervision** | ByteTrack multi-object tracking |
+| **Supervision** | Detection data structures |
+| **Trackers** | ByteTrack multi-object tracking |
 | **OpenCV** | Frame I/O, drawing, homography |
 | **Scikit-Learn** | K-Means for jerseys & formations |
 | **SciPy** | Gaussian heatmap smoothing |
