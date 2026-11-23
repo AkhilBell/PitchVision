@@ -11,8 +11,8 @@ Workflow: all work is committed directly to `main` and pushed to `origin/main`. 
 - **Load Video works** (Phase 1 done) and has been run through the real Load Video path on two real 30-second broadcast clips.
 - **Detection is soccer-specific** (Phase 3 done): only players, goalkeepers and referees on the pitch are marked, each with a role, and a ball position is available in 99-100% of frames on the two test clips.
 - **Automatic pitch calibration works** (Phase 4 done): per-frame pitch landmarks drive a real homography; radar and heatmap only update on calibrated frames and freeze with "No pitch view" during close-ups; hard cuts reset the tracker; the Pitch Lines debug toggle projects markings back onto the video.
-- **Speed is a few frames per second** on an Apple M3 with 1080p broadcast footage (player + ball + pitch models). Real-time playback is still out of reach; a "process first, then play back" mode is the planned fix if it stays too slow after Phase 5.
-- **Team colours are not reliable yet**: on both test clips nearly every player is put in Team A. The cause is known and is Phase 5 work.
+- **Team colours are stable** (Phase 5 done): jersey features ignore grass, teams are fitted once on outfield players, and each track's team and role are majority-voted (no mid-clip flips on the test clips). Goalkeepers take the nearest team's side. The heatmap dropdown labels by team and hides short-lived IDs.
+- **Speed is a few frames per second** on an Apple M3 with 1080p broadcast footage (player + ball + pitch models). Real-time playback is still out of reach; a "process first, then play back" mode is the planned fix if it stays too slow after Phase 6.
 - Export MP4 is a placeholder.
 
 ## Target pipeline
@@ -131,15 +131,15 @@ self._homography.set_default_transform(w, h)   # stretches the frame onto the pi
 
 **Done when:** with the debug toggle on, the projected lines sit on the real pitch lines while the camera pans, and the radar freezes cleanly during close-ups.
 
-## Phase 5 - Stable teams and player identity
+## Phase 5 - Stable teams and player identity (done, 23 Nov 2026)
 
-Found in Phase 3: on both test clips nearly every player is put in Team A (for example 14.4 in A and 2.6 in B per frame on a red-versus-green match). At broadcast size a jersey crop is only about 20 x 15 pixels and includes grass around the shoulders, so the "dominant colour" comes out grass-green for almost every player and the clusters do not separate the kits.
+Found in Phase 3: on both test clips nearly every player was put in Team A (for example 14.4 in A and 2.6 in B per frame on a red-versus-green match). At broadcast size a jersey crop is only about 20 x 15 pixels and includes grass around the shoulders, so the "dominant colour" came out grass-green for almost every player and the clusters did not separate the kits.
 
-- [ ] Fix the jersey colour feature in `src/vision/team_classifier.py` so it measures the shirt rather than the grass (for example, ignore grass-coloured pixels or use a tighter crop), and check that both test clips split roughly evenly.
-- [ ] Settle each track's role (player, goalkeeper, referee) by majority vote rather than taking it frame by frame.
-- [ ] Fit team colours once, on outfield players only, and cache the team per track ID with a majority vote instead of re-clustering every player on every frame (`src/vision/team_classifier.py`). This also improves speed.
-- [ ] Assign goalkeepers to the team whose players are nearest.
-- [ ] Heatmap dropdown: label entries with their team and remove IDs that were only seen briefly.
+- [x] Fix the jersey colour feature in `src/vision/team_classifier.py` so it measures the shirt rather than the grass (tight torso crop + ignore grass-coloured pixels). Both test clips now split roughly evenly (~9.7/10.3 and ~9.2/9.6 outfield players per frame).
+- [x] Settle each track's role (player, goalkeeper, referee) by majority vote rather than taking it frame by frame.
+- [x] Fit team colours once, on outfield players only, and cache the team per track ID with a majority vote instead of re-clustering every player on every frame (`src/vision/team_classifier.py`). Settled tracks skip further colour extraction.
+- [x] Assign goalkeepers to the team whose players are nearest.
+- [x] Heatmap dropdown: label entries with their team and remove IDs that were only seen briefly (`HEATMAP_MIN_TRACK_FRAMES`).
 
 Known limit: an ID is a tracker number, not a shirt number, and a player gets a new ID after leaving the frame. Shirt-number recognition is a stretch goal outside this roadmap.
 

@@ -1,213 +1,192 @@
-"""Jersey-colour K-Means team classifier.
+"""Jersey-colour team classifier with per-track majority voting.
 
-Assigns each detected player to *Team A*, *Team B*, or *Referee* by
-clustering the dominant jersey colour extracted from the upper-middle
-region of their bounding box.
+Fits a two-cluster colour model on outfield players only (referees and
+goalkeepers are assigned elsewhere), using a tight torso crop and
+grass-pixel filtering so the dominant colour is the shirt, not the pitch.
+Once fitted, each track ID accumulates colour votes and settles on Team A
+or Team B after a few observations.
 """
 
 from __future__ import annotations
+
+from collections import Counter
 
 import cv2
 import numpy as np
 import supervision as sv
 from sklearn.cluster import KMeans
 
+from src import config
+
 
 class TeamClassifier:
-    """Cluster players into two teams and a referee group using jersey colour.
+    """Assign outfield players to Team A or Team B by jersey colour.
 
-    The classifier operates in two phases:
-
-    1. **fit** — collect dominant colours from all detections in a
-       representative frame and cluster them into *n_clusters* groups.
-       The two largest groups become Team A / B and the smallest becomes
-       the referee cluster.
-    2. **classify** — assign an individual bounding box to a team label
-       (``"A"``, ``"B"``, or ``"ref"``) using the fitted model.
-
-    Parameters
-    ----------
-    n_clusters : int
-        Number of colour clusters (default ``3``: two teams + referee).
+    Workflow
+    --------
+    1. :meth:`fit` — once, on a frame with enough outfield players.
+    2. :meth:`observe` — each frame, for each outfield track; returns the
+       current majority team and locks it after
+       :pydata:`config.TEAM_VOTE_SETTLE` votes.
+    3. :meth:`clear_tracks` — drop per-track votes after a hard cut (the
+       colour model itself is kept).
     """
 
-    def __init__(self, n_clusters: int = 3) -> None:
-        self.n_clusters: int = n_clusters
+    def __init__(self) -> None:
         self._kmeans: KMeans | None = None
         self._cluster_to_team: dict[int, str] = {}
         self._fitted: bool = False
+        self._votes: dict[int, Counter[str]] = {}
+        self._settled: dict[int, str] = {}
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def fit(self, frame: np.ndarray, detections: sv.Detections) -> None:
-        """Fit the colour model from a set of player detections.
+    def fit(
+        self,
+        frame: np.ndarray,
+        detections: sv.Detections,
+        roles: list[str] | None = None,
+    ) -> bool:
+        """Fit a 2-team colour model from outfield player detections.
 
-        Parameters
-        ----------
-        frame : np.ndarray
-            BGR image (H × W × 3).
-        detections : sv.Detections
-            Player detections whose bounding boxes will be used.
+        Goalkeepers and referees are skipped.  Returns ``True`` when the
+        model was fitted successfully.
         """
-        dominant_colours: list[np.ndarray] = []
-
-        for bbox in detections.xyxy:
-            try:
-                crop = self._extract_jersey_crop(frame, tuple(bbox.astype(int)))
-                if crop.size == 0:
-                    continue
-                colour = self._get_dominant_color(crop)
-                dominant_colours.append(colour)
-            except Exception:
+        features: list[np.ndarray] = []
+        for i, bbox in enumerate(detections.xyxy):
+            if roles is not None and roles[i] != "player":
                 continue
+            feature = self._jersey_feature(frame, tuple(int(v) for v in bbox))
+            if feature is not None:
+                features.append(feature)
 
-        if len(dominant_colours) < self.n_clusters:
-            # Not enough data to fit — leave unfitted.
-            return
+        if len(features) < config.TEAM_FIT_MIN_PLAYERS:
+            return False
 
-        colour_array: np.ndarray = np.array(dominant_colours)
+        colour_array = np.asarray(features, dtype=np.float64)
+        self._kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
+        labels = self._kmeans.fit_predict(colour_array)
 
-        self._kmeans = KMeans(
-            n_clusters=self.n_clusters,
-            random_state=42,
-            n_init=10,
-        )
-        labels: np.ndarray = self._kmeans.fit_predict(colour_array)
-
-        # Count members of each cluster and map to team labels.
-        cluster_sizes: dict[int, int] = {}
-        for label in labels:
-            cluster_sizes[label] = cluster_sizes.get(int(label), 0) + 1
-
-        # Sort clusters by size (descending).
-        sorted_clusters = sorted(cluster_sizes.items(), key=lambda x: x[1], reverse=True)
-
-        self._cluster_to_team = {}
-        for rank, (cluster_id, _) in enumerate(sorted_clusters):
-            if rank == 0:
-                self._cluster_to_team[cluster_id] = "A"
-            elif rank == 1:
-                self._cluster_to_team[cluster_id] = "B"
-            else:
-                self._cluster_to_team[cluster_id] = "ref"
-
+        # Larger cluster → Team A (stable label across runs; size is only
+        # a tie-break, not a semantic "home" assignment).
+        counts = Counter(int(label) for label in labels)
+        ordered = [cid for cid, _ in counts.most_common()]
+        self._cluster_to_team = {
+            ordered[0]: "A",
+            ordered[1]: "B",
+        }
         self._fitted = True
+        return True
+
+    def observe(self, track_id: int, frame: np.ndarray, bbox: tuple) -> str:
+        """Classify *bbox* and fold the result into this track's vote.
+
+        After enough votes the team is locked and colour extraction is
+        skipped on later frames (cheaper and stable).
+        """
+        settled = self._settled.get(track_id)
+        if settled is not None:
+            return settled
+
+        label = self.classify(frame, bbox)
+        if label not in ("A", "B"):
+            votes = self._votes.get(track_id)
+            return votes.most_common(1)[0][0] if votes else "unknown"
+
+        votes = self._votes.setdefault(track_id, Counter())
+        votes[label] += 1
+        team = votes.most_common(1)[0][0]
+        if sum(votes.values()) >= config.TEAM_VOTE_SETTLE:
+            self._settled[track_id] = team
+        return team
 
     def classify(self, frame: np.ndarray, bbox: tuple) -> str:
-        """Classify a single player as Team A, Team B, or referee.
-
-        Parameters
-        ----------
-        frame : np.ndarray
-            BGR image (H × W × 3).
-        bbox : tuple
-            Bounding box ``(x1, y1, x2, y2)`` in pixel coordinates.
-
-        Returns
-        -------
-        str
-            ``"A"``, ``"B"``, ``"ref"``, or ``"unknown"`` if the model
-            has not been fitted.
-        """
+        """One-shot colour classification without updating track votes."""
         if not self._fitted or self._kmeans is None:
             return "unknown"
-
+        feature = self._jersey_feature(frame, bbox)
+        if feature is None:
+            return "unknown"
         try:
-            crop = self._extract_jersey_crop(frame, bbox)
-            if crop.size == 0:
-                return "unknown"
-            colour = self._get_dominant_color(crop)
-            cluster: int = int(self._kmeans.predict(colour.reshape(1, -1))[0])
-            return self._cluster_to_team.get(cluster, "unknown")
+            cluster = int(self._kmeans.predict(feature.reshape(1, -1))[0])
         except Exception:
             return "unknown"
+        return self._cluster_to_team.get(cluster, "unknown")
+
+    def clear_tracks(self) -> None:
+        """Drop per-track votes after a scene cut (IDs are reused)."""
+        self._votes.clear()
+        self._settled.clear()
 
     @property
     def is_fitted(self) -> bool:
-        """Whether :meth:`fit` has been called successfully."""
+        """Whether :meth:`fit` has succeeded."""
         return self._fitted
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Feature extraction
     # ------------------------------------------------------------------
 
+    def _jersey_feature(
+        self, frame: np.ndarray, bbox: tuple
+    ) -> np.ndarray | None:
+        """Return a LAB colour feature for the shirt, or ``None``."""
+        crop = self._extract_jersey_crop(frame, bbox)
+        if crop is None:
+            return None
+        return self._colour_feature(crop)
+
     @staticmethod
-    def _extract_jersey_crop(frame: np.ndarray, bbox: tuple) -> np.ndarray:
-        """Extract the jersey region from a bounding box.
+    def _extract_jersey_crop(
+        frame: np.ndarray, bbox: tuple
+    ) -> np.ndarray | None:
+        """Tight torso crop: mid-height band, middle half of the box width.
 
-        The jersey region is defined as the upper 40 % of the bounding
-        box height and the middle 60 % of the width, which is where
-        the jersey colour is most consistent (avoiding head / shorts).
-
-        Parameters
-        ----------
-        frame : np.ndarray
-            BGR image.
-        bbox : tuple
-            ``(x1, y1, x2, y2)`` integer pixel coordinates.
-
-        Returns
-        -------
-        np.ndarray
-            Cropped image in CIE-LAB colour space.
+        The old "upper 40 %" crop pulled in grass around the shoulders at
+        broadcast resolution; this band sits on the shirt body instead.
         """
-        x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+        x1, y1, x2, y2 = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+        h = y2 - y1
+        w = x2 - x1
+        if h < 8 or w < 8:
+            return None
 
-        h: int = y2 - y1
-        w: int = x2 - x1
+        crop_y1 = y1 + int(h * 0.15)
+        crop_y2 = y1 + int(h * 0.55)
+        margin = int(w * 0.25)
+        crop_x1 = x1 + margin
+        crop_x2 = x2 - margin
 
-        if h <= 0 or w <= 0:
-            return np.array([])
-
-        # Upper 40 % height
-        crop_y1: int = y1
-        crop_y2: int = y1 + int(h * 0.4)
-
-        # Middle 60 % width
-        margin: int = int(w * 0.2)
-        crop_x1: int = x1 + margin
-        crop_x2: int = x2 - margin
-
-        # Clamp to frame bounds
         fh, fw = frame.shape[:2]
         crop_y1 = max(0, crop_y1)
         crop_y2 = min(fh, crop_y2)
         crop_x1 = max(0, crop_x1)
         crop_x2 = min(fw, crop_x2)
-
         if crop_y2 <= crop_y1 or crop_x2 <= crop_x1:
-            return np.array([])
-
-        crop_bgr: np.ndarray = frame[crop_y1:crop_y2, crop_x1:crop_x2]
-        crop_lab: np.ndarray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2LAB)
-        return crop_lab
+            return None
+        return frame[crop_y1:crop_y2, crop_x1:crop_x2]
 
     @staticmethod
-    def _get_dominant_color(crop: np.ndarray) -> np.ndarray:
-        """Determine the dominant colour of a crop via 2-cluster KMeans.
+    def _colour_feature(crop_bgr: np.ndarray) -> np.ndarray | None:
+        """Median LAB of non-grass pixels in *crop_bgr*.
 
-        Parameters
-        ----------
-        crop : np.ndarray
-            Image crop (H × W × 3) in any colour space.
-
-        Returns
-        -------
-        np.ndarray
-            1-D array of length 3 representing the dominant colour
-            (the centre of the largest cluster).
+        Grass is detected in HSV (green hue, moderate saturation).  If too
+        few non-grass pixels remain, the median of the whole crop is used.
         """
-        pixels: np.ndarray = crop.reshape(-1, 3).astype(np.float32)
+        if crop_bgr.size == 0:
+            return None
 
-        km = KMeans(n_clusters=2, random_state=0, n_init=5)
-        km.fit(pixels)
+        hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
+        h, s, v = cv2.split(hsv)
+        grass = (h >= 35) & (h <= 95) & (s >= 40) & (v >= 40) & (v <= 220)
 
-        # Pick the cluster with more members.
-        labels: np.ndarray = km.labels_
-        count_0: int = int(np.sum(labels == 0))
-        count_1: int = int(np.sum(labels == 1))
-
-        dominant_idx: int = 0 if count_0 >= count_1 else 1
-        return km.cluster_centers_[dominant_idx].astype(np.float64)
+        lab = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2LAB).reshape(-1, 3).astype(np.float32)
+        mask = (~grass).reshape(-1)
+        kept = lab[mask]
+        if len(kept) < max(10, int(0.15 * len(lab))):
+            kept = lab
+        if len(kept) == 0:
+            return None
+        return np.median(kept, axis=0).astype(np.float64)

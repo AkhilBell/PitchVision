@@ -233,6 +233,23 @@ HEATMAP_SIGMA: float = 2.5
 HEATMAP_REDRAW_INTERVAL_S: float = 0.5
 """Minimum time between live heatmap redraws, in seconds."""
 
+HEATMAP_MIN_TRACK_FRAMES: int = 15
+"""Frames a track must appear before it is listed in the heatmap dropdown.
+
+Short-lived IDs (a player briefly entering the frame, or a false detection)
+are ignored so the dropdown stays usable.
+"""
+
+# ── Team / identity ─────────────────────────────────────────────────────────
+TEAM_FIT_MIN_PLAYERS: int = 8
+"""Minimum outfield players in one frame before jersey colours are fitted."""
+
+TEAM_VOTE_SETTLE: int = 5
+"""Colour observations needed before a track's team label is locked."""
+
+ROLE_VOTE_SETTLE: int = 5
+"""Role observations needed before a track's role is locked."""
+
 # ── Formation detection ─────────────────────────────────────────────────────
 FORMATION_CLUSTERS_RANGE: range = range(2, 6)
 """Range of *k* values to evaluate when fitting K-Means for formation lines."""

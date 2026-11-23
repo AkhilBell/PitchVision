@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import Counter
 from typing import Optional
 
 import cv2
@@ -45,6 +46,8 @@ from src.vision.pitch_keypoints import PitchKeypointDetector
 from src.vision.team_classifier import TeamClassifier
 
 logger = logging.getLogger(__name__)
+
+_VALID_ROLES = frozenset({"player", "goalkeeper", "referee"})
 
 
 def _detections_to_players(
@@ -142,6 +145,8 @@ class PipelineWorker(QThread):
         self._prev_hist: np.ndarray | None = None
         self._smoothed_players: dict[int, tuple[float, float]] = {}
         self._smoothed_ball: tuple[float, float] | None = None
+        self._role_votes: dict[int, Counter[str]] = {}
+        self._role_settled: dict[int, str] = {}
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -221,28 +226,27 @@ class PipelineWorker(QThread):
                     frame_index, ball_dets
                 )
 
-                # ── 2. Team classification ──────────────────────────────
-                # Roles reported by the detector take precedence over the
-                # jersey-colour guess.
+                # ── 2. Roles + team classification ──────────────────────
+                # Settle role and team per track ID so a single noisy frame
+                # cannot flip a player's identity.
                 if players:
-                    if not self._team_classifier.is_fitted:
-                        self._team_classifier.fit(frame, player_dets)
+                    for player in players:
+                        player.role = self._observe_role(player.track_id, player.role)
 
-                    known_roles = self._detector.provides_roles
+                    if not self._team_classifier.is_fitted:
+                        self._team_classifier.fit(frame, player_dets, roles)
+
                     for player in players:
                         if player.role == "referee":
                             player.team = "ref"
                         elif player.role == "goalkeeper":
-                            # A goalkeeper's kit matches neither team, so
-                            # colour cannot say which side they are on.
+                            # Kit colour is not the team's; assigned later
+                            # from nearest outfield teammates.
                             player.team = "unknown"
                         else:
-                            team = self._team_classifier.classify(frame, player.bbox)
-                            if team == "ref" and known_roles:
-                                # The detector says this is a player, so the
-                                # referee colour match is wrong.
-                                team = "unknown"
-                            player.team = team
+                            player.team = self._team_classifier.observe(
+                                player.track_id, frame, player.bbox
+                            )
 
                 # ── 3. Pitch keypoints → homography ─────────────────────
                 pitch_calibrated = self._calibrate_pitch(frame)
@@ -258,6 +262,10 @@ class PipelineWorker(QThread):
                         player.pitch_xy = None
                     if ball is not None:
                         ball.pitch_xy = None
+
+                # Goalkeepers need positions (pitch or pixel) to pick a side.
+                if players:
+                    self._assign_goalkeeper_teams(players)
 
                 homography_matrix: Optional[np.ndarray] = (
                     self._homography.matrix if pitch_calibrated else None
@@ -345,9 +353,65 @@ class PipelineWorker(QThread):
         self._homography.clear()
         self._smoothed_players.clear()
         self._smoothed_ball = None
+        self._role_votes.clear()
+        self._role_settled.clear()
+        self._team_classifier.clear_tracks()
         # Force a fresh ball search; IDs and last-ball position do not
         # carry across a cut / replay / angle change.
         self._ball_tracker = BallTracker(max_jump_px=self._ball_tracker.max_jump_px)
+
+    def _observe_role(self, track_id: int, observed: str) -> str:
+        """Majority-vote the role for *track_id* and lock it when stable."""
+        settled = self._role_settled.get(track_id)
+        if settled is not None:
+            return settled
+
+        role = observed if observed in _VALID_ROLES else "player"
+        votes = self._role_votes.setdefault(track_id, Counter())
+        votes[role] += 1
+        best = votes.most_common(1)[0][0]
+        if sum(votes.values()) >= config.ROLE_VOTE_SETTLE:
+            self._role_settled[track_id] = best
+        return best
+
+    @staticmethod
+    def _assign_goalkeeper_teams(players: list[PlayerState]) -> None:
+        """Set each goalkeeper's team to the nearest outfield team's side."""
+        outfield = [
+            p
+            for p in players
+            if p.role == "player" and p.team in ("A", "B")
+        ]
+        goalkeepers = [p for p in players if p.role == "goalkeeper"]
+        if not outfield or not goalkeepers:
+            return
+
+        def _xy(player: PlayerState) -> tuple[float, float] | None:
+            if player.pitch_xy is not None:
+                return float(player.pitch_xy[0]), float(player.pitch_xy[1])
+            if player.foot_px is not None:
+                return float(player.foot_px[0]), float(player.foot_px[1])
+            return None
+
+        centroids: dict[str, np.ndarray] = {}
+        for team in ("A", "B"):
+            pts = [_xy(p) for p in outfield if p.team == team]
+            pts = [p for p in pts if p is not None]
+            if pts:
+                centroids[team] = np.mean(np.asarray(pts, dtype=np.float64), axis=0)
+
+        if not centroids:
+            return
+
+        for gk in goalkeepers:
+            gk_xy = _xy(gk)
+            if gk_xy is None:
+                continue
+            best_team = min(
+                centroids,
+                key=lambda team: float(np.linalg.norm(centroids[team] - gk_xy)),
+            )
+            gk.team = best_team
 
     def _smooth_positions(
         self,

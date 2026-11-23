@@ -108,9 +108,9 @@ python3 -m src.main
 
 ### Using the Heatmap
 
-- The **"Select Player"** dropdown populates automatically as players are tracked
-- Select any player ID to view their real-time positional heatmap
-- The heatmap updates live frame-by-frame with Gaussian-smoothed density
+- The **"Select Player"** dropdown lists durable tracks as `Team A #12`, `GK #3 (Team B)`, etc.
+- Brief false IDs (seen for fewer than ~15 frames) are kept out of the list
+- Select any entry to view that player's real-time positional heatmap
 - Hot (bright) areas show where the player spends the most time
 
 ---
@@ -150,10 +150,10 @@ When you load a video, a background thread processes each frame through these st
 1. **YOLO Detection** — A soccer-trained model detects players, goalkeepers and referees; each person carries a `role`
 2. **ByteTrack Tracking** — Assigns persistent IDs to players across frames so the same player keeps the same number
 3. **Ball Tracking** — A dedicated ball model searches a small full-resolution window around the ball's last position (the whole frame when the ball is lost); detections that jump implausibly far are ignored and short gaps are filled with linear interpolation
-4. **Team Classification** — Referees and goalkeepers come from the detector; other players are split into Team A / Team B by clustering jersey colours with K-Means (fits once, on the first frame with enough players)
+4. **Team Classification** — Outfield jersey colours (tight crop, grass filtered) are clustered once into Team A / B; each track's team and role are majority-voted so labels stay stable. Referees come from the detector; goalkeepers take the nearest team's side
 5. **Pitch Calibration** — A pose model finds pitch landmarks; with ≥ 4 confident points a per-frame homography maps pixels onto the 105×68 m pitch. Close-ups and cuts leave positions empty ("No pitch view"); hard cuts also reset the tracker
 6. **Formation Detection** — Clusters outfield players by position along the pitch to identify tactical shapes (4-3-3, 4-4-2, etc.) — only meaningful on calibrated frames
-7. **Heatmap Accumulation** — Increments a per-player 2D grid on calibrated frames only
+7. **Heatmap Accumulation** — Increments a per-player 2D grid on calibrated frames only; the dropdown labels by team and hides short-lived IDs
 
 Each processed frame is emitted as a `FramePacket` to the UI thread, which updates all three panels simultaneously.
 
@@ -213,6 +213,9 @@ All tunable parameters live in [`src/config.py`](src/config.py):
 | `PITCH_MIN_KEYPOINTS` | `4` | Landmarks needed before a homography is estimated |
 | `SCENE_CUT_HIST_CORR` | `0.6` | Histogram correlation below which a hard cut is assumed |
 | `POSITION_SMOOTHING_ALPHA` | `0.4` | EMA weight on new pitch positions (1.0 = no smoothing) |
+| `TEAM_FIT_MIN_PLAYERS` | `8` | Outfield players needed in one frame before jersey colours are fitted |
+| `TEAM_VOTE_SETTLE` / `ROLE_VOTE_SETTLE` | `5` | Observations before a track's team / role is locked |
+| `HEATMAP_MIN_TRACK_FRAMES` | `15` | Sightings before a track appears in the heatmap dropdown |
 | `CONFIDENCE_THRESHOLD` | `0.3` | Min detection confidence |
 | `IOU_THRESHOLD` | `0.5` | NMS IoU threshold |
 | `DEVICE` | `None` | Inference device (`"mps"`, `"cuda"`, `"cpu"`); `None` picks the fastest available |
@@ -230,7 +233,7 @@ All tunable parameters live in [`src/config.py`](src/config.py):
 - **15–30 second clips** are ideal for initial testing
 - **Wide broadcast shots** are required for pitch calibration; close-ups and replays show "No pitch view" and freeze the radar/heatmap until a wide shot returns
 - Turn on **Pitch Lines** in the status bar to check that projected markings sit on the real pitch lines while the camera pans
-- The team classifier needs **at least 3 visible players** to fit — it fits once, on the first frame that has enough players
+- The team classifier needs **at least 8 outfield players** in one frame to fit — it fits once, then locks each track's team after a few colour votes
 - Formation detection needs **at least 3 players per team** with valid pitch positions
 
 ---

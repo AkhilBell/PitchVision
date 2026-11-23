@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from PySide6.QtWidgets import QComboBox, QLabel, QVBoxLayout, QWidget
 
-from src.config import HEATMAP_REDRAW_INTERVAL_S
+from src.config import HEATMAP_MIN_TRACK_FRAMES, HEATMAP_REDRAW_INTERVAL_S
 
 try:
     import matplotlib
@@ -48,6 +48,8 @@ class HeatmapWidget(QWidget):
 
         self._engine: HeatmapEngine | None = None
         self._known_ids: set[int] = set()
+        self._sightings: dict[int, int] = {}
+        self._labels: dict[int, str] = {}
         self._last_redraw: float = 0.0  # time.monotonic() of the last redraw
 
         layout = QVBoxLayout(self)
@@ -87,24 +89,45 @@ class HeatmapWidget(QWidget):
             The engine accumulating player positions.
         """
         self._engine = engine
+        self._known_ids.clear()
+        self._sightings.clear()
+        self._labels.clear()
+        self._combo.blockSignals(True)
+        self._combo.clear()
+        self._combo.blockSignals(False)
 
     def update_players(self, players: list[Any]) -> None:
-        """Refresh the combo box with available track IDs.
+        """Refresh the combo box with durable, team-labelled track IDs.
 
-        New IDs are appended without removing existing ones to prevent
-        UI flickering.  If no player is currently selected the first
-        entry is auto-selected.
+        A track is listed only after it has been seen for
+        :pydata:`HEATMAP_MIN_TRACK_FRAMES` frames, so brief false IDs do
+        not flood the dropdown.  Labels include the team when known.
 
         Parameters
         ----------
         players : list
-            Objects with ``track_id: int``.
+            Objects with ``track_id``, and optionally ``team`` / ``role``.
         """
         for p in players:
             tid = getattr(p, "track_id", None)
-            if tid is not None and tid not in self._known_ids:
+            if tid is None:
+                continue
+            tid = int(tid)
+            self._sightings[tid] = self._sightings.get(tid, 0) + 1
+            label = self._format_label(p)
+            self._labels[tid] = label
+
+            if self._sightings[tid] < HEATMAP_MIN_TRACK_FRAMES:
+                continue
+
+            if tid not in self._known_ids:
                 self._known_ids.add(tid)
-                self._combo.addItem(f"Player {tid}", userData=tid)
+                self._combo.addItem(label, userData=tid)
+            else:
+                # Keep the label in sync when the team settles later.
+                idx = self._combo.findData(tid)
+                if idx >= 0 and self._combo.itemText(idx) != label:
+                    self._combo.setItemText(idx, label)
 
         if self._combo.currentIndex() < 0 and self._combo.count() > 0:
             self._combo.setCurrentIndex(0)
@@ -167,6 +190,23 @@ class HeatmapWidget(QWidget):
     # ------------------------------------------------------------------
     # Drawing helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _format_label(player: Any) -> str:
+        """Build a dropdown label like ``Team A #7`` or ``GK #3 (Team B)``."""
+        tid = getattr(player, "track_id", "?")
+        team = getattr(player, "team", "unknown")
+        role = getattr(player, "role", "player")
+
+        if role == "referee":
+            return f"Ref #{tid}"
+        if role == "goalkeeper":
+            if team in ("A", "B"):
+                return f"GK #{tid} (Team {team})"
+            return f"GK #{tid}"
+        if team in ("A", "B"):
+            return f"Team {team} #{tid}"
+        return f"Player #{tid}"
 
     def _draw_pitch_outline(self) -> None:
         """Draw basic pitch markings on ``self._ax``."""
