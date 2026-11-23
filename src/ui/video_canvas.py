@@ -93,6 +93,8 @@ class VideoCanvas(QWidget):
         # -- Players --
         players: list[Any] = getattr(packet, "players", []) or []
         for player in players:
+            if getattr(player, "offscreen", False):
+                continue
             foot_px = getattr(player, "foot_px", None)
             bbox = getattr(player, "bbox", None)
             track_id = getattr(player, "track_id", None)

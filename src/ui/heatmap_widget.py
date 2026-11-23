@@ -13,7 +13,11 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from PySide6.QtWidgets import QComboBox, QLabel, QVBoxLayout, QWidget
 
-from src.config import HEATMAP_MIN_TRACK_FRAMES, HEATMAP_REDRAW_INTERVAL_S
+from src.config import (
+    HEATMAP_MIN_TRACK_FRAMES,
+    HEATMAP_REDRAW_INTERVAL_S,
+    HEATMAP_VMAX_FRACTION,
+)
 
 try:
     import matplotlib
@@ -59,10 +63,20 @@ class HeatmapWidget(QWidget):
         self._label = QLabel("Live Player Heatmap")
         layout.addWidget(self._label)
 
-        # Player selector combo box.
+        # Player selector combo box. Team entries aggregate every track.
         self._combo = QComboBox()
+        self._combo.addItem("Team A (all)", userData=("team", "A"))
+        self._combo.addItem("Team B (all)", userData=("team", "B"))
         self._combo.currentIndexChanged.connect(self._on_player_changed)
         layout.addWidget(self._combo)
+
+        self._scale = QLabel(
+            "Colour is share of the full clip (bright ≈ "
+            f"{HEATMAP_VMAX_FRACTION:.0%} of the video in that spot). "
+            "It finishes filling in when the clip ends."
+        )
+        self._scale.setWordWrap(True)
+        layout.addWidget(self._scale)
 
         # Matplotlib canvas.
         if _MPL_AVAILABLE:
@@ -94,6 +108,8 @@ class HeatmapWidget(QWidget):
         self._labels.clear()
         self._combo.blockSignals(True)
         self._combo.clear()
+        self._combo.addItem("Team A (all)", userData=("team", "A"))
+        self._combo.addItem("Team B (all)", userData=("team", "B"))
         self._combo.blockSignals(False)
 
     def update_players(self, players: list[Any]) -> None:
@@ -109,6 +125,8 @@ class HeatmapWidget(QWidget):
             Objects with ``track_id``, and optionally ``team`` / ``role``.
         """
         for p in players:
+            if getattr(p, "offscreen", False):
+                continue
             tid = getattr(p, "track_id", None)
             if tid is None:
                 continue
@@ -150,11 +168,13 @@ class HeatmapWidget(QWidget):
         idx = self._combo.currentIndex()
         if idx < 0:
             return
-        track_id: int = self._combo.itemData(idx)
-        if track_id is None:
+        selected = self._combo.itemData(idx)
+        if selected is None:
             return
-
-        heatmap = self._engine.get_heatmap(track_id)
+        if isinstance(selected, tuple) and selected and selected[0] == "team":
+            heatmap = self._engine.get_team_heatmap(selected[1])
+        else:
+            heatmap = self._engine.get_heatmap(int(selected))
 
         self._ax.clear()
 
@@ -168,8 +188,10 @@ class HeatmapWidget(QWidget):
                 origin="upper",
                 extent=[0, _PITCH_LENGTH, _PITCH_WIDTH, 0],
                 cmap="hot",
-                alpha=0.7,
+                alpha=0.85,
                 aspect="auto",
+                vmin=0.0,
+                vmax=HEATMAP_VMAX_FRACTION,
             )
 
         self._ax.set_xlim(0, _PITCH_LENGTH)

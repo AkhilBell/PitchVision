@@ -240,6 +240,15 @@ Short-lived IDs (a player briefly entering the frame, or a false detection)
 are ignored so the dropdown stays usable.
 """
 
+HEATMAP_VMAX_FRACTION: float = 0.12
+"""Share of the full clip that maps to the hottest heatmap colour.
+
+Each cell is ``frames spent there / total frames in the clip`` (after a
+light blur), so a player who pauses for a moment does not fill the map.
+``0.12`` means 12% of the clip in one area is full brightness. The scale
+is fixed for the whole video, so the picture is only complete at the end.
+"""
+
 # ── Team / identity ─────────────────────────────────────────────────────────
 TEAM_FIT_MIN_PLAYERS: int = 8
 """Minimum outfield players in one frame before jersey colours are fitted."""
@@ -254,9 +263,43 @@ ROLE_VOTE_SETTLE: int = 5
 FORMATION_CLUSTERS_RANGE: range = range(2, 6)
 """Range of *k* values to evaluate when fitting K-Means for formation lines."""
 
+FORMATION_MIN_OUTFIELD: int = 7
+"""Outfield players (on screen or recently seen) required to name a formation.
+
+Below this the label is a dash: a shape built from a handful of visible
+players is not the team's formation. The label also stays put until the
+same shape has been seen on two analyses in a row, so one noisy frame
+cannot flip it.
+"""
+
+OFFSCREEN_HOLD_S: float = 2.5
+"""How long a player who has left the frame still counts toward the formation.
+
+Their last calibrated pitch position is reused. They are not invented if
+they were never seen, and they are dropped on a cut. Heatmaps do not
+keep accumulating for them.
+"""
+
 # ── Rendering / export ──────────────────────────────────────────────────────
 MAX_FPS: int = 30
 """Maximum frames-per-second for real-time playback."""
+
+PLAYBACK_FPS: float = 24.0
+"""Target rate for showing video frames.
+
+The three detection models cannot run at this rate. Heavy analysis runs
+every ``ANALYSIS_STRIDE`` frames and the frames in between reuse that
+result, so the picture moves at about this speed while overlays refresh
+a few times a second.
+"""
+
+ANALYSIS_STRIDE: int = 12
+"""Run player, ball and pitch models on every Nth frame.
+
+``12`` leaves about half a second for one analysis, which is what the
+three models cost on an Apple M3, so the other frames can be shown at
+about 24 fps. Set to ``1`` to analyse every frame (slow motion playback).
+"""
 
 VIDEO_EXPORT_CODEC: str = "mp4v"
 """FourCC codec identifier used by :class:`cv2.VideoWriter`."""

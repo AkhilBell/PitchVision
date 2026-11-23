@@ -12,7 +12,7 @@ Workflow: all work is committed directly to `main` and pushed to `origin/main`. 
 - **Detection is soccer-specific** (Phase 3 done): only players, goalkeepers and referees on the pitch are marked, each with a role, and a ball position is available in 99-100% of frames on the two test clips.
 - **Automatic pitch calibration works** (Phase 4 done): per-frame pitch landmarks drive a real homography; radar and heatmap only update on calibrated frames and freeze with "No pitch view" during close-ups; hard cuts reset the tracker; the Pitch Lines debug toggle projects markings back onto the video.
 - **Team colours are stable** (Phase 5 done): jersey features ignore grass, teams are fitted once on outfield players, and each track's team and role are majority-voted (no mid-clip flips on the test clips). Goalkeepers take the nearest team's side. The heatmap dropdown labels by team and hides short-lived IDs.
-- **Speed is a few frames per second** on an Apple M3 with 1080p broadcast footage (player + ball + pitch models). Real-time playback is still out of reach; a "process first, then play back" mode is the planned fix if it stays too slow after Phase 6.
+- **Formations and heatmaps** (Phase 6 done): each team is oriented from its own goalkeeper; a formation is shown only when enough outfield players are on screen or were seen in the last few seconds (off-camera players keep their last pitch position). Heatmaps are a share of the full clip, not a per-player peak. Video is shown at about 24 fps by analysing every 12th frame.
 - Export MP4 is a placeholder.
 
 ## Target pipeline
@@ -145,17 +145,14 @@ Known limit: an ID is a tracker number, not a shirt number, and a player gets a 
 
 **Done when:** team colours do not flip during the clip and the dropdown is not flooded with short-lived IDs.
 
-## Phase 6 - Correct formations and heatmaps
+## Phase 6 - Correct formations and heatmaps (done, 23 Nov 2026)
 
-- [ ] Fix the attacking direction per team in `src/analytics/formation_engine.py`. It currently assumes both teams defend the same goal:
-
-```python
-gk_idx = int(np.argmin(coords[:, 0]))   # treats x=0 as "own goal" for both teams
-```
-
-- [ ] Use the goalkeeper role from Phase 3 instead of dropping the player nearest the goal line.
-- [ ] Only report a formation when enough of a team's outfield players are visible, and smooth it over the last few seconds; otherwise show a dash. Expect formations only during wide shots.
-- [ ] Accumulate heatmaps only on calibrated frames; add a team heatmap option using the existing, unused `get_team_heatmap`.
+- [x] Fix the attacking direction per team in `src/analytics/formation_engine.py`. It used to assume both teams defend the same goal (`argmin` of x). Each team is now oriented from its own goalkeeper.
+- [x] Use the goalkeeper role when the detector provides one. If it does not, the player nearest either goal line is the fallback and is not counted as an outfield line.
+- [x] Only report a formation when at least `FORMATION_MIN_OUTFIELD` outfield players are available, and smooth the label over the last few seconds; otherwise show a dash.
+- [x] Players who leave the frame keep their last pitch position for `OFFSCREEN_HOLD_S` (hollow dots on the radar) so a formation is not built only from whoever the camera currently shows. They are not invented if never seen, and a cut drops them. Heatmaps do not keep counting them.
+- [x] Accumulate heatmaps only on calibrated frames. Scale each cell by the full clip length (`frames there / total frames`) with a fixed colour range, so a short pause does not look like the whole game. Add a team heatmap option (`Team A (all)` / `Team B (all)`).
+- [x] Play the video at about 24 fps. The three models cannot run that fast, so they run every `ANALYSIS_STRIDE` frames (default 12) and the frames in between reuse that result. The models are warmed up once before the first frame.
 
 **Done when:** the formation label is steady during wide shots and blank otherwise.
 

@@ -34,23 +34,41 @@ class HeatmapEngine:
         self.grid_shape: tuple[int, int] = grid_shape
         self.sigma: float = sigma
         self._grids: dict[int, np.ndarray] = {}
+        self._team_of: dict[int, str] = {}
+        self._clip_frames: int = 1
+        """Denominator for time-share heatmaps: frames in the whole clip."""
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def update(self, players: list[Any]) -> None:
-        """Increment accumulator cells for every player with a valid
-        ``pitch_xy`` attribute.
+    def set_clip_frames(self, total_frames: int) -> None:
+        """Set the clip length used to turn counts into a time share.
+
+        Parameters
+        ----------
+        total_frames : int
+            Number of frames in the video being played.
+        """
+        self._clip_frames = max(1, int(total_frames))
+
+    def update(self, players: list[Any], weight: float = 1.0) -> None:
+        """Add *weight* video-frames of occupancy for each on-screen player.
 
         Parameters
         ----------
         players : list
             Sequence of objects exposing ``track_id: int`` and
-            ``pitch_xy: tuple[float, float] | None``.
+            ``pitch_xy: tuple[float, float] | None``. Players with
+            ``offscreen`` set are skipped.
+        weight : float
+            How many video frames this sample represents. One displayed
+            frame should pass ``1`` so the total matches clip time.
         """
         rows, cols = self.grid_shape
         for player in players:
+            if getattr(player, "offscreen", False):
+                continue
             pitch_xy = getattr(player, "pitch_xy", None)
             if pitch_xy is None:
                 continue
@@ -58,18 +76,23 @@ class HeatmapEngine:
             if track_id < 0:
                 continue
 
-            # Ensure an accumulator exists for this player.
             if track_id not in self._grids:
                 self._grids[track_id] = np.zeros(self.grid_shape, dtype=np.float64)
 
-            # Convert continuous pitch coords to integer grid indices.
+            team = getattr(player, "team", None)
+            if team in ("A", "B"):
+                self._team_of[track_id] = team
+
             gx = int(np.clip(pitch_xy[0], 0, rows - 1))
             gy = int(np.clip(pitch_xy[1], 0, cols - 1))
-            self._grids[track_id][gx, gy] += 1.0
+            self._grids[track_id][gx, gy] += float(weight)
 
     def get_heatmap(self, track_id: int) -> np.ndarray | None:
-        """Return a Gaussian-smoothed, 0–1 normalised heatmap for
-        *track_id*, or ``None`` if the id has never been seen.
+        """Return this player's time-share heatmap.
+
+        Values are ``smoothed frame-counts / frames in the clip``, so a
+        cell of ``0.05`` means about 5% of the video was spent there.
+        The result is not re-scaled to the player's own peak.
 
         Parameters
         ----------
@@ -79,47 +102,39 @@ class HeatmapEngine:
         Returns
         -------
         np.ndarray | None
-            2-D array of shape ``grid_shape`` with values in [0, 1],
-            or ``None``.
+            2-D array of shape ``grid_shape``, or ``None`` if unseen.
         """
         grid = self._grids.get(track_id)
         if grid is None:
             return None
-
         smoothed = gaussian_filter(grid.astype(np.float64), sigma=self.sigma)
-        peak = smoothed.max()
-        if peak > 0:
-            smoothed /= peak
-        return smoothed
+        return smoothed / float(self._clip_frames)
 
-    def get_team_heatmap(self, players: list[Any], team: str) -> np.ndarray:
-        """Aggregate smoothed heatmaps for every player belonging to
-        *team*.
+    def get_team_heatmap(self, team: str, players: list[Any] | None = None) -> np.ndarray:
+        """Aggregate time-share heatmap for every player last seen on *team*.
 
         Parameters
         ----------
-        players : list
-            Objects with ``track_id``, ``pitch_xy``, and ``team`` attrs.
         team : str
-            Team identifier to filter on (e.g. ``"A"`` or ``"B"``).
+            ``"A"`` or ``"B"``.
+        players : list | None
+            Ignored. Kept so older callers that passed the live player
+            list still work; membership comes from teams recorded in
+            :meth:`update`.
 
         Returns
         -------
         np.ndarray
-            Normalised aggregate heatmap (shape ``grid_shape``).
+            Time-share heatmap (shape ``grid_shape``).
         """
+        del players  # membership is stored per track, not taken from one frame
         aggregate = np.zeros(self.grid_shape, dtype=np.float64)
-        for player in players:
-            if getattr(player, "team", None) != team:
+        for track_id, grid in self._grids.items():
+            if self._team_of.get(track_id) != team:
                 continue
-            hm = self.get_heatmap(getattr(player, "track_id", -1))
-            if hm is not None:
-                aggregate += hm
-
-        peak = aggregate.max()
-        if peak > 0:
-            aggregate /= peak
-        return aggregate
+            aggregate += grid
+        smoothed = gaussian_filter(aggregate, sigma=self.sigma)
+        return smoothed / float(self._clip_frames)
 
     def get_all_track_ids(self) -> list[int]:
         """Return a sorted list of every track ID seen so far."""
@@ -139,3 +154,4 @@ class HeatmapEngine:
                 self._grids[track_id] = np.zeros(self.grid_shape, dtype=np.float64)
         else:
             self._grids.clear()
+            self._team_of.clear()

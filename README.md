@@ -151,9 +151,9 @@ When you load a video, a background thread processes each frame through these st
 2. **ByteTrack Tracking** — Assigns persistent IDs to players across frames so the same player keeps the same number
 3. **Ball Tracking** — A dedicated ball model searches a small full-resolution window around the ball's last position (the whole frame when the ball is lost); detections that jump implausibly far are ignored and short gaps are filled with linear interpolation
 4. **Team Classification** — Outfield jersey colours (tight crop, grass filtered) are clustered once into Team A / B; each track's team and role are majority-voted so labels stay stable. Referees come from the detector; goalkeepers take the nearest team's side
-5. **Pitch Calibration** — A pose model finds pitch landmarks; with ≥ 4 confident points a per-frame homography maps pixels onto the 105×68 m pitch. Close-ups and cuts leave positions empty ("No pitch view"); hard cuts also reset the tracker
-6. **Formation Detection** — Clusters outfield players by position along the pitch to identify tactical shapes (4-3-3, 4-4-2, etc.) — only meaningful on calibrated frames
-7. **Heatmap Accumulation** — Increments a per-player 2D grid on calibrated frames only; the dropdown labels by team and hides short-lived IDs
+5. **Pitch Calibration** — A pose model finds pitch landmarks; with ≥ 4 confident points a homography maps pixels onto the 105×68 m pitch. Close-ups and cuts leave positions empty ("No pitch view"); hard cuts also reset the tracker
+6. **Formation Detection** — Clusters outfield players into lines, oriented from each team's own goal. Players who have just left the frame still count for a few seconds. The label is blank unless enough of the team is accounted for
+7. **Heatmap Accumulation** — On calibrated frames only. Colour is the share of the **whole clip** spent in that area (not each player's own peak), so it is only a full picture when the clip ends. The dropdown also has a team-wide heatmap
 
 Each processed frame is emitted as a `FramePacket` to the UI thread, which updates all three panels simultaneously.
 
@@ -223,6 +223,11 @@ All tunable parameters live in [`src/config.py`](src/config.py):
 | `HEATMAP_SIGMA` | `2.5` | Gaussian blur for heatmaps |
 | `PITCH_LENGTH` | `105.0` | Pitch length in metres |
 | `PITCH_WIDTH` | `68.0` | Pitch width in metres |
+| `PLAYBACK_FPS` | `24` | Target speed for showing the video |
+| `ANALYSIS_STRIDE` | `12` | Run the heavy models every Nth frame (`1` = every frame, much slower) |
+| `FORMATION_MIN_OUTFIELD` | `7` | Outfield players needed before a formation is named |
+| `OFFSCREEN_HOLD_S` | `2.5` | Seconds a player who left the frame still counts in the formation |
+| `HEATMAP_VMAX_FRACTION` | `0.12` | Clip share that maps to the hottest heatmap colour |
 | `MAX_FPS` | `30` | Playback FPS cap |
 
 ---

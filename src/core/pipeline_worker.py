@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import Counter
+from dataclasses import replace
 from typing import Optional
 
 import cv2
@@ -147,6 +148,13 @@ class PipelineWorker(QThread):
         self._smoothed_ball: tuple[float, float] | None = None
         self._role_votes: dict[int, Counter[str]] = {}
         self._role_settled: dict[int, str] = {}
+        self._last_seen: dict[int, tuple[PlayerState, int]] = {}
+        self._form_accepted: dict[str, str] = {"A": "—", "B": "—"}
+        self._form_candidate: dict[str, str | None] = {"A": None, "B": None}
+        self._cached_players: list[PlayerState] | None = None
+        self._cached_ball: Optional[BallState] = None
+        self._cached_calibrated: bool = False
+        self._cached_matrix: Optional[np.ndarray] = None
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -188,12 +196,18 @@ class PipelineWorker(QThread):
                 props["fps"],
             )
 
-            # Playback pacing: never show frames faster than the source
-            # frame rate (capped at MAX_FPS), but add no delay when the
-            # pipeline is already slower than that.
-            target_fps = min(float(config.MAX_FPS), props["fps"] or float(config.MAX_FPS))
+            source_fps = float(props["fps"] or config.PLAYBACK_FPS)
+            # Show frames at about 24 fps. Analysis cannot keep up with
+            # that on every frame, so it runs on a stride (see below).
+            target_fps = min(float(config.PLAYBACK_FPS), float(config.MAX_FPS), source_fps)
             frame_interval = 1.0 / target_fps
-            next_emit_at = 0.0  # earliest time.monotonic() the next frame may be shown
+            next_emit_at = 0.0
+            stride = max(1, int(config.ANALYSIS_STRIDE))
+            hold_frames = max(1, int(config.OFFSCREEN_HOLD_S * source_fps))
+            self._heatmap_engine.set_clip_frames(total_frames)
+            # First inference on the GPU is several times slower than the
+            # rest (shaders compile). Do it before the first frame is shown.
+            self._warmup_models()
 
             for frame_index, timestamp_ms, frame in frame_generator(self.video_path):
                 if not self._running:
@@ -210,89 +224,48 @@ class PipelineWorker(QThread):
                 if self._is_scene_cut(frame):
                     self._on_scene_cut()
 
-                # ── 1. Object detection + ball tracking ─────────────────
-                if self._ball_tracker.max_jump_px is None:
-                    frame_h, frame_w = frame.shape[:2]
-                    self._ball_tracker.max_jump_px = (
-                        config.BALL_MAX_JUMP_FRACTION * float(np.hypot(frame_w, frame_h))
+                analyse = (
+                    self._cached_players is None
+                    or frame_index % stride == 0
+                )
+                if analyse:
+                    players, ball, pitch_calibrated = self._analyse_frame(
+                        frame, frame_index
+                    )
+                    self._cached_players = players
+                    self._cached_ball = ball
+                    self._cached_calibrated = pitch_calibrated
+                    self._cached_matrix = (
+                        self._homography.matrix if pitch_calibrated else None
+                    )
+                else:
+                    players = self._cached_players or []
+                    ball = self._cached_ball
+                    pitch_calibrated = self._cached_calibrated
+
+                # Remember players who just left the frame so the formation
+                # can still count them. Never invent someone we have not seen.
+                roster = self._roster_with_offscreen(players, frame_index, hold_frames)
+                pitch_state = self._smoothed_formation(roster, fresh=analyse)
+
+                # One count per video frame, on-screen players only, and
+                # only while the camera is calibrated. Dividing by the
+                # full clip length later makes this a time share.
+                if pitch_calibrated:
+                    self._heatmap_engine.update(
+                        [p for p in players if not getattr(p, "offscreen", False)]
                     )
 
-                player_dets, ball_dets = self._detector.detect(
-                    frame, ball_hint=self._ball_tracker.search_center
-                )
-                roles = self._detector.roles(player_dets)
-                players = _detections_to_players(player_dets, roles)
-                ball: Optional[BallState] = self._ball_tracker.update(
-                    frame_index, ball_dets
-                )
-
-                # ── 2. Roles + team classification ──────────────────────
-                # Settle role and team per track ID so a single noisy frame
-                # cannot flip a player's identity.
-                if players:
-                    for player in players:
-                        player.role = self._observe_role(player.track_id, player.role)
-
-                    if not self._team_classifier.is_fitted:
-                        self._team_classifier.fit(frame, player_dets, roles)
-
-                    for player in players:
-                        if player.role == "referee":
-                            player.team = "ref"
-                        elif player.role == "goalkeeper":
-                            # Kit colour is not the team's; assigned later
-                            # from nearest outfield teammates.
-                            player.team = "unknown"
-                        else:
-                            player.team = self._team_classifier.observe(
-                                player.track_id, frame, player.bbox
-                            )
-
-                # ── 3. Pitch keypoints → homography ─────────────────────
-                pitch_calibrated = self._calibrate_pitch(frame)
-                if pitch_calibrated:
-                    players = self._homography.transform_players(players)
-                    if ball is not None:
-                        ball = self._homography.transform_ball(ball)
-                    self._smooth_positions(players, ball)
-                else:
-                    # Close-up / cut / missing model: leave pitch_xy empty
-                    # so radar and heatmap freeze for this frame.
-                    for player in players:
-                        player.pitch_xy = None
-                    if ball is not None:
-                        ball.pitch_xy = None
-
-                # Goalkeepers need positions (pitch or pixel) to pick a side.
-                if players:
-                    self._assign_goalkeeper_teams(players)
-
-                homography_matrix: Optional[np.ndarray] = (
-                    self._homography.matrix if pitch_calibrated else None
-                )
-
-                # ── 4. Formation detection ──────────────────────────────
-                pitch_state: PitchState = self._formation_engine.detect_both_teams(
-                    players
-                )
-
-                # ── 5. Heatmap accumulation (calibrated frames only) ────
-                if pitch_calibrated:
-                    self._heatmap_engine.update(players)
-
-                # ── 6. Package & emit ───────────────────────────────────
                 packet = FramePacket(
                     frame_index=frame_index,
                     timestamp_ms=timestamp_ms,
                     raw_frame=frame,
-                    players=players,
+                    players=roster,
                     ball=ball,
                     pitch_state=pitch_state,
-                    homography_matrix=homography_matrix,
+                    homography_matrix=self._cached_matrix if pitch_calibrated else None,
                     pitch_calibrated=pitch_calibrated,
                 )
-                # Hold the frame back only if the previous one was shown
-                # less than one frame interval ago.
                 delay = next_emit_at - time.monotonic()
                 if delay > 0:
                     self.msleep(int(delay * 1000))
@@ -356,9 +329,140 @@ class PipelineWorker(QThread):
         self._role_votes.clear()
         self._role_settled.clear()
         self._team_classifier.clear_tracks()
+        self._last_seen.clear()
+        self._form_accepted = {"A": "—", "B": "—"}
+        self._form_candidate = {"A": None, "B": None}
+        self._cached_players = None
+        self._cached_ball = None
+        self._cached_calibrated = False
+        self._cached_matrix = None
         # Force a fresh ball search; IDs and last-ball position do not
         # carry across a cut / replay / angle change.
         self._ball_tracker = BallTracker(max_jump_px=self._ball_tracker.max_jump_px)
+
+    def _analyse_frame(
+        self, frame: np.ndarray, frame_index: int
+    ) -> tuple[list[PlayerState], Optional[BallState], bool]:
+        """Run detection, teams and pitch calibration on one frame."""
+        if self._ball_tracker.max_jump_px is None:
+            frame_h, frame_w = frame.shape[:2]
+            self._ball_tracker.max_jump_px = (
+                config.BALL_MAX_JUMP_FRACTION * float(np.hypot(frame_w, frame_h))
+            )
+
+        player_dets, ball_dets = self._detector.detect(
+            frame, ball_hint=self._ball_tracker.search_center
+        )
+        roles = self._detector.roles(player_dets)
+        players = _detections_to_players(player_dets, roles)
+        ball: Optional[BallState] = self._ball_tracker.update(frame_index, ball_dets)
+
+        if players:
+            for player in players:
+                player.role = self._observe_role(player.track_id, player.role)
+
+            if not self._team_classifier.is_fitted:
+                self._team_classifier.fit(frame, player_dets, roles)
+
+            for player in players:
+                if player.role == "referee":
+                    player.team = "ref"
+                elif player.role == "goalkeeper":
+                    player.team = "unknown"
+                else:
+                    player.team = self._team_classifier.observe(
+                        player.track_id, frame, player.bbox
+                    )
+
+        pitch_calibrated = self._calibrate_pitch(frame)
+        if pitch_calibrated:
+            players = self._homography.transform_players(players)
+            if ball is not None:
+                ball = self._homography.transform_ball(ball)
+            self._smooth_positions(players, ball)
+        else:
+            for player in players:
+                player.pitch_xy = None
+            if ball is not None:
+                ball.pitch_xy = None
+
+        if players:
+            self._assign_goalkeeper_teams(players)
+        return players, ball, pitch_calibrated
+
+    def _roster_with_offscreen(
+        self,
+        players: list[PlayerState],
+        frame_index: int,
+        hold_frames: int,
+    ) -> list[PlayerState]:
+        """Visible players plus recently seen players who have left the frame."""
+        visible_ids = {player.track_id for player in players}
+        for player in players:
+            player.offscreen = False
+            if player.pitch_xy is None:
+                continue
+            self._last_seen[player.track_id] = (replace(player), frame_index)
+
+        roster = list(players)
+        for track_id, (snap, seen_at) in list(self._last_seen.items()):
+            if track_id in visible_ids:
+                continue
+            if frame_index - seen_at > hold_frames:
+                del self._last_seen[track_id]
+                continue
+            roster.append(replace(snap, offscreen=True))
+        return roster
+
+    def _smoothed_formation(
+        self, players: list[PlayerState], fresh: bool
+    ) -> PitchState:
+        """Detect formations, and only change the label when it repeats.
+
+        A single noisy frame would otherwise flip 4-4-2 to 4-3-3 and back.
+        The label updates on analysis frames only, and only after the same
+        shape has been seen on two analyses in a row.
+        """
+        state = self._formation_engine.detect_both_teams(players)
+        if fresh:
+            state.formation_a = self._latch_formation("A", state.formation_a)
+            state.formation_b = self._latch_formation("B", state.formation_b)
+        else:
+            state.formation_a = self._form_accepted["A"]
+            state.formation_b = self._form_accepted["B"]
+        if state.formation_a == "—":
+            state.formation_lines_a = []
+        if state.formation_b == "—":
+            state.formation_lines_b = []
+        return state
+
+    def _latch_formation(self, team: str, new_label: str) -> str:
+        """Accept *new_label* once it agrees with the previous analysis."""
+        accepted = self._form_accepted[team]
+        if new_label == accepted:
+            self._form_candidate[team] = None
+            return accepted
+        if new_label == self._form_candidate[team]:
+            self._form_accepted[team] = new_label
+            self._form_candidate[team] = None
+            return new_label
+        self._form_candidate[team] = new_label
+        return accepted
+
+    def _warmup_models(self) -> None:
+        """Run one throwaway inference so the first real frame is not stalled."""
+        blank = np.zeros((640, 360, 3), dtype=np.uint8)
+        try:
+            self._detector.detect(blank)
+            self._pitch_detector.detect(blank)
+        except Exception:
+            logger.debug("Model warmup failed", exc_info=True)
+        # Warmup detections must not leak into the match.
+        try:
+            self._detector.tracker.reset()
+        except Exception:
+            logger.debug("Tracker reset after warmup failed", exc_info=True)
+        self._ball_tracker = BallTracker()
 
     def _observe_role(self, track_id: int, observed: str) -> str:
         """Majority-vote the role for *track_id* and lock it when stable."""

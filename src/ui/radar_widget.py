@@ -162,9 +162,15 @@ class RadarWidget(QWidget):
             else:
                 color = QColor(200, 200, 200)
 
-            painter.setBrush(QBrush(color))
+            offscreen = bool(getattr(player, "offscreen", False))
             painter.setPen(QPen(QColor(255, 255, 255), 0.8))
-            painter.drawEllipse(QPoint(px, py), 5, 5)
+            if offscreen:
+                # Last position of someone who has left the frame.
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(QPoint(px, py), 5, 5)
+            else:
+                painter.setBrush(QBrush(color))
+                painter.drawEllipse(QPoint(px, py), 5, 5)
 
             # Track ID text.
             track_id = getattr(player, "track_id", None)

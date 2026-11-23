@@ -13,6 +13,8 @@ import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
+from src import config
+
 
 class FormationEngine:
     """Detect team formations from player pitch coordinates.
@@ -56,26 +58,39 @@ class FormationEngine:
             *formation_lines* groups ``(x, y)`` pitch coordinates by
             cluster line (sorted from defensive to attacking).
         """
-        # Filter players with valid pitch positions.
-        valid: list[tuple[float, float]] = []
+        # Outfield players only. The goalkeeper is identified by role and
+        # used solely to decide which goal this team defends.
+        outfield: list[tuple[float, float]] = []
+        gk_x: list[float] = []
         for p in team_players:
             xy = getattr(p, "pitch_xy", None)
-            if xy is not None:
-                valid.append((float(xy[0]), float(xy[1])))
+            if xy is None:
+                continue
+            role = getattr(p, "role", "player")
+            if role == "goalkeeper":
+                gk_x.append(float(xy[0]))
+            elif role != "referee":
+                outfield.append((float(xy[0]), float(xy[1])))
 
-        if len(valid) < 3:
-            return ("?", [valid])
+        if not gk_x and outfield:
+            # The detector often misses the goalkeeper. Fall back to the
+            # player closest to either goal line and take them out of the
+            # outfield count so they are not a formation line.
+            nearest = min(
+                range(len(outfield)),
+                key=lambda i: min(outfield[i][0], config.PITCH_LENGTH - outfield[i][0]),
+            )
+            gk_x = [outfield[nearest][0]]
+            del outfield[nearest]
 
-        coords = np.array(valid, dtype=np.float64)  # (N, 2)
+        if len(outfield) < config.FORMATION_MIN_OUTFIELD or not gk_x:
+            return ("—", [])
 
-        # Exclude the goalkeeper — the outfield player closest to x=0
-        # (own goal line).
-        gk_idx = int(np.argmin(coords[:, 0]))
-        outfield_coords = np.delete(coords, gk_idx, axis=0)
+        # The goalkeeper stands in front of their own goal. x = 0 is the
+        # left goal line on this pitch.
+        defend_left = float(np.mean(gk_x)) < (config.PITCH_LENGTH / 2.0)
 
-        if len(outfield_coords) < 3:
-            return ("?", [valid])
-
+        outfield_coords = np.array(outfield, dtype=np.float64)
         x_vals = outfield_coords[:, 0].reshape(-1, 1)
 
         # Try k in 2..5 and keep the clustering with best silhouette.
@@ -95,14 +110,14 @@ class FormationEngine:
                 best_k = k
 
         if best_labels is None:
-            return ("?", [valid])
+            return ("—", [])
 
-        # Sort clusters by mean X (defensive -> attacking).
+        # Sort clusters from this team's own goal toward the other goal.
         cluster_means: list[tuple[int, float]] = []
         for cid in range(best_k):
             mask = best_labels == cid
             cluster_means.append((cid, float(outfield_coords[mask, 0].mean())))
-        cluster_means.sort(key=lambda t: t[1])
+        cluster_means.sort(key=lambda t: t[1], reverse=not defend_left)
 
         cluster_sizes: list[int] = []
         formation_lines: list[list[tuple[float, float]]] = []
@@ -135,8 +150,8 @@ class FormationEngine:
         team_a = [p for p in players if getattr(p, "team", None) == "A"]
         team_b = [p for p in players if getattr(p, "team", None) == "B"]
 
-        form_a, lines_a = self.detect(team_a) if len(team_a) >= 3 else ("?", [])
-        form_b, lines_b = self.detect(team_b) if len(team_b) >= 3 else ("?", [])
+        form_a, lines_a = self.detect(team_a)
+        form_b, lines_b = self.detect(team_b)
 
         return PitchState(
             formation_a=form_a,

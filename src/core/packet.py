@@ -48,6 +48,10 @@ class PlayerState:
         ``"referee"``.  Generic models report everyone as ``"player"``.
     jersey_crop : np.ndarray | None
         Cropped torso image used for team-colour classification.
+    offscreen : bool
+        ``True`` when this is a remembered position for a player who has
+        left the frame. Used for formation only; overlays and heatmaps
+        skip these.
     """
 
     track_id: int
@@ -58,6 +62,7 @@ class PlayerState:
     team: str = "unknown"
     role: str = "player"
     jersey_crop: Optional[np.ndarray] = None
+    offscreen: bool = False
 
 
 @dataclass
