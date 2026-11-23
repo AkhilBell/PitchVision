@@ -66,6 +66,14 @@ class VideoCanvas(QWidget):
         if frame is None:
             return
         annotated = self._draw_overlays(frame, packet)
+        # The widget is much smaller than a broadcast frame. Scaling here
+        # keeps the paint cheap enough to hold 25–30 fps during playback.
+        target_w = self.width()
+        if target_w >= 160 and annotated.shape[1] > target_w:
+            target_h = max(1, int(round(annotated.shape[0] * (target_w / annotated.shape[1]))))
+            annotated = cv2.resize(
+                annotated, (target_w, target_h), interpolation=cv2.INTER_AREA
+            )
         self._pixmap = self._numpy_to_pixmap(annotated)
         self.update()  # schedule paintEvent
 
@@ -230,12 +238,14 @@ class VideoCanvas(QWidget):
         if self._pixmap.isNull():
             return
         painter = QPainter(self)
-        scaled = self._pixmap.scaled(
-            self.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        x = (self.width() - scaled.width()) // 2
-        y = (self.height() - scaled.height()) // 2
-        painter.drawPixmap(x, y, scaled)
+        pixmap = self._pixmap
+        if pixmap.width() > self.width() or pixmap.height() > self.height():
+            pixmap = pixmap.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation,
+            )
+        x = (self.width() - pixmap.width()) // 2
+        y = (self.height() - pixmap.height()) // 2
+        painter.drawPixmap(x, y, pixmap)
         painter.end()

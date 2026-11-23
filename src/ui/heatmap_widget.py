@@ -18,6 +18,7 @@ from src.config import (
     HEATMAP_REDRAW_INTERVAL_S,
     HEATMAP_VMAX_FRACTION,
 )
+from src.ui.pitch_diagram import pitch_markings
 
 try:
     import matplotlib
@@ -177,23 +178,28 @@ class HeatmapWidget(QWidget):
             heatmap = self._engine.get_heatmap(int(selected))
 
         self._ax.clear()
-
-        # Draw a simplified pitch outline.
-        self._draw_pitch_outline()
+        self._ax.set_facecolor("#228B22")
 
         # y grows downward (y = 0 at the top), matching the radar widget.
+        # The colour layer goes down first so the markings stay visible
+        # on top of it; drawing them first buried the penalty lines.
         if heatmap is not None:
+            # Empty cells stay transparent so the pitch markings stay visible
+            # instead of disappearing under a black layer.
+            shown = np.ma.masked_less_equal(heatmap.T, 1e-8)
             self._ax.imshow(
-                heatmap.T,
+                shown,
                 origin="upper",
                 extent=[0, _PITCH_LENGTH, _PITCH_WIDTH, 0],
                 cmap="hot",
-                alpha=0.85,
+                alpha=0.9,
                 aspect="auto",
                 vmin=0.0,
                 vmax=HEATMAP_VMAX_FRACTION,
+                zorder=1,
             )
 
+        self._draw_pitch_outline()
         self._ax.set_xlim(0, _PITCH_LENGTH)
         self._ax.set_ylim(_PITCH_WIDTH, 0)
         self._ax.set_xticks([])
@@ -231,58 +237,16 @@ class HeatmapWidget(QWidget):
         return f"Player #{tid}"
 
     def _draw_pitch_outline(self) -> None:
-        """Draw basic pitch markings on ``self._ax``."""
+        """Draw the full pitch, including both penalty areas and the D."""
         if self._ax is None:
             return
 
-        ax = self._ax
-        lw = 0.8
-        color = "white"
-
-        # Background.
-        ax.set_facecolor("#228B22")
-
-        # Outline.
-        ax.plot(
-            [0, _PITCH_LENGTH, _PITCH_LENGTH, 0, 0],
-            [0, 0, _PITCH_WIDTH, _PITCH_WIDTH, 0],
-            color=color,
-            linewidth=lw,
-        )
-
-        # Centre line.
-        ax.plot(
-            [_PITCH_LENGTH / 2, _PITCH_LENGTH / 2],
-            [0, _PITCH_WIDTH],
-            color=color,
-            linewidth=lw,
-        )
-
-        # Centre circle.
-        theta = np.linspace(0, 2 * np.pi, 60)
-        r = 9.15
-        cx, cy = _PITCH_LENGTH / 2, _PITCH_WIDTH / 2
-        ax.plot(cx + r * np.cos(theta), cy + r * np.sin(theta), color=color, linewidth=lw)
-
-        # Penalty areas (16.5 m × 40.3 m).
-        pa_d = 16.5
-        pa_hw = 20.15
-        mid = _PITCH_WIDTH / 2
-        for x0 in [0, _PITCH_LENGTH - pa_d]:
-            ax.plot(
-                [x0, x0 + pa_d, x0 + pa_d, x0],
-                [mid - pa_hw, mid - pa_hw, mid + pa_hw, mid + pa_hw],
-                color=color,
-                linewidth=lw,
-            )
-
-        # Goal areas (5.5 m × 18.3 m).
-        ga_d = 5.5
-        ga_hw = 9.15
-        for x0 in [0, _PITCH_LENGTH - ga_d]:
-            ax.plot(
-                [x0, x0 + ga_d, x0 + ga_d, x0],
-                [mid - ga_hw, mid - ga_hw, mid + ga_hw, mid + ga_hw],
-                color=color,
-                linewidth=lw,
+        for marking in pitch_markings():
+            self._ax.plot(
+                marking[:, 0],
+                marking[:, 1],
+                color="white",
+                linewidth=1.3,
+                solid_capstyle="round",
+                zorder=3,
             )

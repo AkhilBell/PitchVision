@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import Counter
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Optional
 
 import cv2
@@ -49,6 +49,17 @@ from src.vision.team_classifier import TeamClassifier
 logger = logging.getLogger(__name__)
 
 _VALID_ROLES = frozenset({"player", "goalkeeper", "referee"})
+
+
+@dataclass
+class _StoredFrame:
+    """Analysis for one video frame, kept so playback does not rerun the models."""
+
+    players: list[PlayerState]
+    ball: Optional[BallState]
+    pitch_state: PitchState
+    homography_matrix: Optional[np.ndarray]
+    pitch_calibrated: bool
 
 
 def _detections_to_players(
@@ -123,6 +134,9 @@ class PipelineWorker(QThread):
     status = Signal(str)
     """Emits a short status line while the video is opening."""
 
+    playback_started = Signal()
+    """Emitted once analysis is done and full-speed playback begins."""
+
     def __init__(self, video_path: str, parent=None) -> None:
         super().__init__(parent)
         self.video_path = video_path
@@ -157,6 +171,7 @@ class PipelineWorker(QThread):
         self._cached_calibrated: bool = False
         self._cached_matrix: Optional[np.ndarray] = None
         self._cached_pitch: Optional[PitchState] = None
+        self._playing_back: bool = False
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -180,6 +195,11 @@ class PipelineWorker(QThread):
     @paused.setter
     def paused(self, value: bool) -> None:
         self._paused = bool(value)
+
+    @property
+    def playing_back(self) -> bool:
+        """True once the models are finished and the clip is being replayed."""
+        return self._playing_back
 
     def stop(self) -> None:
         """Request the worker to stop after the current frame."""
@@ -213,9 +233,6 @@ class PipelineWorker(QThread):
                 props["fps"],
             )
             source_fps = float(props["fps"] or config.PLAYBACK_FPS)
-            target_fps = min(float(config.PLAYBACK_FPS), float(config.MAX_FPS), source_fps)
-            frame_interval = 1.0 / target_fps
-            next_emit_at = 0.0
             player_stride = max(1, int(config.PLAYER_STRIDE))
             pitch_stride = max(player_stride, int(config.PITCH_STRIDE))
             ball_stride = max(player_stride, int(config.BALL_STRIDE))
@@ -233,6 +250,12 @@ class PipelineWorker(QThread):
             def _all_frames():
                 yield first
                 yield from frames
+
+            # The models cannot keep up with the video, so this pass records
+            # a result for every frame as fast as it can. Playback then
+            # replays the file at full speed without running them again.
+            stored: list[_StoredFrame] = []
+            last_preview = 0.0
 
             for frame_index, timestamp_ms, frame in _all_frames():
                 if not self._running:
@@ -295,22 +318,34 @@ class PipelineWorker(QThread):
                         [p for p in players if not getattr(p, "offscreen", False)]
                     )
 
-                packet = FramePacket(
-                    frame_index=frame_index,
-                    timestamp_ms=timestamp_ms,
-                    raw_frame=frame,
-                    players=roster,
-                    ball=ball,
-                    pitch_state=pitch_state,
-                    homography_matrix=self._cached_matrix if pitch_calibrated else None,
-                    pitch_calibrated=pitch_calibrated,
+                matrix = self._cached_matrix if pitch_calibrated else None
+                stored.append(
+                    self._snapshot(roster, ball, pitch_state, matrix, pitch_calibrated)
                 )
-                delay = next_emit_at - time.monotonic()
-                if delay > 0:
-                    self.msleep(int(delay * 1000))
-                self.frame_ready.emit(packet)
+                now = time.monotonic()
+                if frame_index == 0 or now - last_preview >= 0.25:
+                    done = frame_index + 1
+                    self.status.emit(
+                        f"Analysing… {done}/{total_frames}. "
+                        "Full-speed playback starts when this finishes."
+                    )
+                    self.frame_ready.emit(
+                        FramePacket(
+                            frame_index=frame_index,
+                            timestamp_ms=timestamp_ms,
+                            raw_frame=frame,
+                            players=stored[-1].players,
+                            ball=stored[-1].ball,
+                            pitch_state=stored[-1].pitch_state,
+                            homography_matrix=stored[-1].homography_matrix,
+                            pitch_calibrated=pitch_calibrated,
+                        )
+                    )
+                    last_preview = now
                 self.progress.emit(frame_index, total_frames)
-                next_emit_at = time.monotonic() + frame_interval
+
+            if self._running and stored:
+                self._play_recording(stored, source_fps, total_frames)
 
         except FileNotFoundError as exc:
             self.error.emit(str(exc))
@@ -320,6 +355,66 @@ class PipelineWorker(QThread):
         finally:
             # QThread emits its built-in ``finished`` signal when run() returns.
             logger.info("PipelineWorker finished")
+
+    def _snapshot(
+        self,
+        roster: list[PlayerState],
+        ball: Optional[BallState],
+        pitch_state: PitchState,
+        matrix: Optional[np.ndarray],
+        pitch_calibrated: bool,
+    ) -> _StoredFrame:
+        """Copy one frame's analysis so later frames cannot change it."""
+        return _StoredFrame(
+            players=[replace(player, jersey_crop=None) for player in roster],
+            ball=replace(ball) if ball is not None else None,
+            pitch_state=PitchState(
+                formation_a=pitch_state.formation_a,
+                formation_b=pitch_state.formation_b,
+                formation_lines_a=[tuple(line) for line in pitch_state.formation_lines_a],
+                formation_lines_b=[tuple(line) for line in pitch_state.formation_lines_b],
+            ),
+            homography_matrix=None if matrix is None else np.array(matrix, copy=True),
+            pitch_calibrated=pitch_calibrated,
+        )
+
+    def _play_recording(
+        self,
+        stored: list[_StoredFrame],
+        source_fps: float,
+        total_frames: int,
+    ) -> None:
+        """Replay the video at full speed using the recorded analysis."""
+        target_fps = min(float(config.PLAYBACK_FPS), float(config.MAX_FPS), source_fps)
+        interval = 1.0 / target_fps
+        self._playing_back = True
+        self.playback_started.emit()
+        self.status.emit(f"Playing at {target_fps:.0f} fps")
+        for frame_index, timestamp_ms, frame in frame_generator(self.video_path):
+            if not self._running or frame_index >= len(stored):
+                break
+            while self._paused and self._running:
+                self.msleep(50)
+            if not self._running:
+                break
+            snap = stored[frame_index]
+            started = time.monotonic()
+            self.frame_ready.emit(
+                FramePacket(
+                    frame_index=frame_index,
+                    timestamp_ms=timestamp_ms,
+                    raw_frame=frame,
+                    players=snap.players,
+                    ball=snap.ball,
+                    pitch_state=snap.pitch_state,
+                    homography_matrix=snap.homography_matrix,
+                    pitch_calibrated=snap.pitch_calibrated,
+                )
+            )
+            self.progress.emit(frame_index, total_frames)
+            remaining = interval - (time.monotonic() - started)
+            if remaining > 0:
+                self.msleep(int(remaining * 1000))
 
     # ── Pitch calibration helpers ───────────────────────────────────────
 

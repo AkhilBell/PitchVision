@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPolygon
 from PySide6.QtWidgets import QWidget
 
 from src.config import (
@@ -18,6 +18,7 @@ from src.config import (
     TEAM_A_COLOR_RGB,
     TEAM_B_COLOR_RGB,
 )
+from src.ui.pitch_diagram import pitch_markings
 
 if TYPE_CHECKING:
     from PySide6.QtGui import QPaintEvent
@@ -110,40 +111,13 @@ class RadarWidget(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRect(_PAD, _PAD, draw_w, draw_h)
 
-        # 2. Pitch markings (white).
+        # 2. Pitch markings (white), including both penalty areas and the D.
         pen_white = QPen(QColor(255, 255, 255), 1.5)
         painter.setPen(pen_white)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-
-        # Outline.
-        painter.drawRect(_PAD, _PAD, draw_w, draw_h)
-
-        # Centre line.
-        cx = _PAD + draw_w // 2
-        painter.drawLine(cx, _PAD, cx, _PAD + draw_h)
-
-        # Centre circle (radius ~9.15 m → fraction of pitch).
-        r_px = int(9.15 / PITCH_LENGTH * draw_w)
-        cy = _PAD + draw_h // 2
-        painter.drawEllipse(
-            QPoint(cx, cy),
-            r_px,
-            int(r_px * draw_h / draw_w * PITCH_LENGTH / PITCH_WIDTH),
-        )
-
-        # Penalty areas (16.5 m deep, 40.3 m wide).
-        pa_depth = int(16.5 / PITCH_LENGTH * draw_w)
-        pa_half_w = int(20.15 / PITCH_WIDTH * draw_h)
-        # Left.
-        painter.drawRect(_PAD, cy - pa_half_w, pa_depth, 2 * pa_half_w)
-        # Right.
-        painter.drawRect(_PAD + draw_w - pa_depth, cy - pa_half_w, pa_depth, 2 * pa_half_w)
-
-        # Goal areas (5.5 m deep, 18.3 m wide).
-        ga_depth = int(5.5 / PITCH_LENGTH * draw_w)
-        ga_half_w = int(9.15 / PITCH_WIDTH * draw_h)
-        painter.drawRect(_PAD, cy - ga_half_w, ga_depth, 2 * ga_half_w)
-        painter.drawRect(_PAD + draw_w - ga_depth, cy - ga_half_w, ga_depth, 2 * ga_half_w)
+        for marking in pitch_markings():
+            points = [QPoint(*self._pitch_to_widget(float(x), float(y))) for x, y in marking]
+            painter.drawPolyline(QPolygon(points))
 
         # 3. Players.
         tiny_font = QFont("Arial", 7)

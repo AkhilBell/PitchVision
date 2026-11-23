@@ -309,11 +309,11 @@ MAX_FPS: int = 30
 """Maximum frames-per-second for real-time playback."""
 
 PLAYBACK_FPS: float = 30.0
-"""Target rate for showing video frames, capped by the file's own frame rate.
+"""Target rate for the replay after analysis, capped by the file's own rate.
 
-The picture is paced to this rate. Player tracking runs every
-``PLAYER_STRIDE`` frames so identities stay stable; the slower pitch and
-ball models run less often and their last result is reused.
+The models are too slow to drive the picture directly, so the clip is
+analysed first and then replayed at this rate with the saved overlays.
+Player tracking still runs every ``PLAYER_STRIDE`` frames during analysis.
 """
 
 PLAYER_STRIDE: int = 3

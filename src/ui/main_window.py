@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -214,10 +215,15 @@ class MainWindow(QMainWindow):
             return
 
         self.heatmap_widget.set_engine(self._worker.heatmap_engine)
-        self._worker.frame_ready.connect(self._on_frame_ready)
+        # Block so a full-speed replay cannot queue hundreds of frames
+        # faster than the window can draw them.
+        self._worker.frame_ready.connect(
+            self._on_frame_ready, Qt.ConnectionType.BlockingQueuedConnection
+        )
         self._worker.progress.connect(self._on_progress)
         self._worker.error.connect(self._on_worker_error)
-        self._worker.status.connect(self.statusBar().showMessage)
+        self._worker.status.connect(self._on_status)
+        self._worker.playback_started.connect(self._on_playback_started)
         self._worker.finished.connect(self._on_worker_finished)
         self._progress.setRange(0, 1)
         self._progress.setValue(0)
@@ -243,10 +249,12 @@ class MainWindow(QMainWindow):
         self.video_canvas.update_frame(packet)
         self.radar_widget.update_data(packet)
 
-        # Heatmap widget: feed players and refresh (engine only accumulates
-        # on calibrated frames, so this redraw freezes during close-ups).
-        self.heatmap_widget.update_players(packet.players)
-        self.heatmap_widget.update_heatmap()
+        # The heatmap is filled during analysis. Redrawing it on every
+        # playback frame would stall the video.
+        playing = self._worker is not None and self._worker.playing_back
+        if not playing:
+            self.heatmap_widget.update_players(packet.players)
+            self.heatmap_widget.update_heatmap()
 
         # Rolling-window FPS estimate.
         elapsed = time.monotonic() - self._fps_window_start
@@ -256,13 +264,15 @@ class MainWindow(QMainWindow):
             self._fps_window_start = time.monotonic()
             self._fps_window_frames = 0
 
-        # Status: advertise missing pitch view during close-ups / cuts.
-        if self._worker is not None:
-            base = self._worker.detector_description
-            if packet.pitch_calibrated:
-                self.statusBar().showMessage(base)
-            else:
-                self.statusBar().showMessage(f"No pitch view | {base}")
+    def _on_status(self, message: str) -> None:
+        """Show a pipeline status line."""
+        self.statusBar().showMessage(message)
+
+    def _on_playback_started(self) -> None:
+        """Reset the FPS counter when full-speed playback begins."""
+        self.heatmap_widget.update_heatmap(force=True)
+        self._fps_window_start = time.monotonic()
+        self._fps_window_frames = 0
 
     def _on_progress(self, frame_index: int, total_frames: int) -> None:
         """Advance the progress bar; *frame_index* is zero-based."""
@@ -322,5 +332,9 @@ class MainWindow(QMainWindow):
         """Ensure the pipeline worker is stopped before closing."""
         if self._worker is not None:
             self._worker.stop()
-            self._worker.wait(3000)
+            # Pump events: playback emits frames with a blocking connection,
+            # so a plain wait() here would deadlock against that slot.
+            while self._worker.isRunning():
+                self._worker.wait(50)
+                QApplication.processEvents()
         super().closeEvent(event)
