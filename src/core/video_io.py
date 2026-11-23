@@ -17,6 +17,7 @@ VideoExporter
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Generator
 
 import cv2
@@ -63,6 +64,30 @@ def frame_generator(
     finally:
         cap.release()
         logger.debug("Released VideoCapture for %s after %d frames", video_path, frame_index)
+
+
+def video_access_problem(video_path: str) -> str | None:
+    """Return a user-facing reason *video_path* cannot be opened, or ``None``.
+
+    This only looks at the file itself. It does not decode the video, so it
+    stays fast and does not try to pull an iCloud file down onto disk.
+    """
+    path = Path(video_path)
+    if not path.is_file():
+        return "That file could not be found."
+    try:
+        info = path.stat()
+    except OSError as exc:
+        return f"That file could not be read: {exc}"
+    if info.st_size < 1000:
+        return "That file is empty or still downloading."
+    # macOS marks files that live only in iCloud. Opening one can hang.
+    if getattr(info, "st_flags", 0) & 0x40000000:
+        return (
+            "That video is still in iCloud and is not on this Mac yet. "
+            "Click it in Finder so it finishes downloading, then load it again."
+        )
+    return None
 
 
 def get_video_properties(video_path: str) -> dict:

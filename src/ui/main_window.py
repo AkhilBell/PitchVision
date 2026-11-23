@@ -7,9 +7,11 @@ single PySide6 ``QMainWindow`` with toolbar and status-bar controls.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QFileDialog,
     QHBoxLayout,
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import (
 
 from src.core.packet import FramePacket
 from src.core.pipeline_worker import PipelineWorker
+from src.core.video_io import video_access_problem
 from src.ui.heatmap_widget import HeatmapWidget
 from src.ui.radar_widget import RadarWidget
 from src.ui.video_canvas import VideoCanvas
@@ -162,19 +165,41 @@ class MainWindow(QMainWindow):
 
     def _on_load_video(self) -> None:
         """Open a file dialog, then start the pipeline on the chosen video."""
+        movies = Path.home() / "Movies"
+        start_dir = str(movies if movies.is_dir() else Path.home())
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Video",
-            "",
+            start_dir,
             "Video Files (*.mp4 *.avi *.mov *.mkv)",
         )
         if not path:
             return
 
-        # Stop any existing worker.
+        problem = video_access_problem(path)
+        if problem:
+            QMessageBox.warning(self, "Cannot open video", problem)
+            return
+
+        self.statusBar().showMessage("Opening video…")
+        QApplication.processEvents()
+
+        # Stop any existing worker without freezing the window. Inference
+        # can only notice the stop between frames, so pump events while waiting.
         if self._worker is not None:
             self._worker.stop()
-            self._worker.wait(3000)
+            for _ in range(40):
+                if self._worker.wait(100):
+                    break
+                QApplication.processEvents()
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Still working",
+                    "The previous video is still finishing a frame. "
+                    "Wait a moment, then load the new one again.",
+                )
+                return
             self._worker = None
 
         try:
@@ -192,6 +217,7 @@ class MainWindow(QMainWindow):
         self._worker.frame_ready.connect(self._on_frame_ready)
         self._worker.progress.connect(self._on_progress)
         self._worker.error.connect(self._on_worker_error)
+        self._worker.status.connect(self.statusBar().showMessage)
         self._worker.finished.connect(self._on_worker_finished)
         self._progress.setRange(0, 1)
         self._progress.setValue(0)
@@ -202,9 +228,7 @@ class MainWindow(QMainWindow):
         self._frame_count = 0
         self._fps_window_start = time.monotonic()
         self._fps_window_frames = 0
-        # Left side of the status bar: which models are analysing the video,
-        # so a missing weights file (generic fallback) is visible.
-        self.statusBar().showMessage(self._worker.detector_description)
+        self.statusBar().showMessage("Opening video…")
 
     # ------------------------------------------------------------------
     # Slot: Frame Ready

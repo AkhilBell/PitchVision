@@ -101,13 +101,14 @@ def _frame_histogram(frame: np.ndarray) -> np.ndarray:
 class PipelineWorker(QThread):
     """Process a video file through the full PitchVision pipeline.
 
-    Parameters
-    ----------
-    video_path : str
-        Absolute or relative path to the input video file.
-    parent : QObject | None
-        Optional Qt parent.
+    The heavy model weights are loaded once per process and reused for
+    later videos. Construction itself does not touch the weights, so the
+    window can show the first frame before analysis starts.
     """
+
+    _shared_detector: PlayerDetector | None = None
+    _shared_pitch: PitchKeypointDetector | None = None
+    _warmed_up: bool = False
 
     # ── Qt signals ──────────────────────────────────────────────────────
     frame_ready = Signal(object)
@@ -119,19 +120,19 @@ class PipelineWorker(QThread):
     error = Signal(str)
     """Emits an error description string on failure."""
 
+    status = Signal(str)
+    """Emits a short status line while the video is opening."""
+
     def __init__(self, video_path: str, parent=None) -> None:
         super().__init__(parent)
         self.video_path = video_path
         self._running: bool = True
         self._paused: bool = False
 
-        self._detector = PlayerDetector(
-            model_path=config.MODEL_PATH,
-            confidence=config.CONFIDENCE_THRESHOLD,
-            iou=config.IOU_THRESHOLD,
-            device=config.DEVICE,
-        )
-        self._pitch_detector = PitchKeypointDetector(device=config.DEVICE)
+        # Filled in on the worker thread. Kept off the UI thread so choosing
+        # a file does not freeze the window while the weights load.
+        self._detector: PlayerDetector | None = None
+        self._pitch_detector: PitchKeypointDetector | None = None
         self._ball_tracker = BallTracker()
         self._team_classifier = TeamClassifier()
         self._homography = HomographyTransformer(
@@ -162,6 +163,8 @@ class PipelineWorker(QThread):
     @property
     def detector_description(self) -> str:
         """One-line summary of the detection models in use."""
+        if self._detector is None or self._pitch_detector is None:
+            return "Loading models…"
         return f"{self._detector.description} | {self._pitch_detector.description}"
 
     @property
@@ -188,6 +191,19 @@ class PipelineWorker(QThread):
     def run(self) -> None:  # noqa: C901 — sequential pipeline steps
         """Execute the pipeline over every frame of the video."""
         try:
+            frames = frame_generator(self.video_path)
+            try:
+                first = next(frames)
+            except StopIteration:
+                self.error.emit("That video has no frames.")
+                return
+            # Show the picture before any model work. Loading the weights
+            # and the first GPU compile take several seconds and used to
+            # leave the window blank.
+            self._emit_preview(*first)
+            if not self._running:
+                return
+
             props = get_video_properties(self.video_path)
             total_frames: int = props["total_frames"]
             logger.info(
@@ -196,10 +212,7 @@ class PipelineWorker(QThread):
                 total_frames,
                 props["fps"],
             )
-
             source_fps = float(props["fps"] or config.PLAYBACK_FPS)
-            # Pace the picture at the file's frame rate, up to 30. Player
-            # tracking runs most frames; pitch and ball run less often.
             target_fps = min(float(config.PLAYBACK_FPS), float(config.MAX_FPS), source_fps)
             frame_interval = 1.0 / target_fps
             next_emit_at = 0.0
@@ -208,11 +221,20 @@ class PipelineWorker(QThread):
             ball_stride = max(player_stride, int(config.BALL_STRIDE))
             hold_frames = max(1, int(config.OFFSCREEN_HOLD_S * source_fps))
             self._heatmap_engine.set_clip_frames(total_frames)
-            # First inference on the GPU is several times slower than the
-            # rest (shaders compile). Do it before the first frame is shown.
-            self._warmup_models()
 
-            for frame_index, timestamp_ms, frame in frame_generator(self.video_path):
+            self.status.emit("Loading the analysis models…")
+            self._load_models()
+            if not PipelineWorker._warmed_up:
+                self.status.emit("Preparing the analysis… the first time takes a few seconds.")
+                self._warmup_models()
+                PipelineWorker._warmed_up = True
+            self.status.emit(self.detector_description)
+
+            def _all_frames():
+                yield first
+                yield from frames
+
+            for frame_index, timestamp_ms, frame in _all_frames():
                 if not self._running:
                     logger.info("PipelineWorker stopped at frame %d", frame_index)
                     break
@@ -526,6 +548,38 @@ class PipelineWorker(QThread):
             return new_label
         self._form_candidate[team] = new_label
         return accepted
+
+    def _load_models(self) -> None:
+        """Attach the shared detectors, loading the weights on first use."""
+        if PipelineWorker._shared_detector is None or PipelineWorker._shared_pitch is None:
+            PipelineWorker._shared_detector = PlayerDetector(
+                model_path=config.MODEL_PATH,
+                confidence=config.CONFIDENCE_THRESHOLD,
+                iou=config.IOU_THRESHOLD,
+                device=config.DEVICE,
+            )
+            PipelineWorker._shared_pitch = PitchKeypointDetector(device=config.DEVICE)
+        else:
+            try:
+                PipelineWorker._shared_detector.tracker.reset()
+            except Exception:
+                logger.debug("Tracker reset before a new video failed", exc_info=True)
+        self._detector = PipelineWorker._shared_detector
+        self._pitch_detector = PipelineWorker._shared_pitch
+
+    def _emit_preview(
+        self, frame_index: int, timestamp_ms: float, frame: np.ndarray
+    ) -> None:
+        """Show *frame* with no overlays so the video appears immediately."""
+        self.frame_ready.emit(
+            FramePacket(
+                frame_index=frame_index,
+                timestamp_ms=timestamp_ms,
+                raw_frame=frame,
+                pitch_state=PitchState(),
+                pitch_calibrated=False,
+            )
+        )
 
     def _warmup_models(self) -> None:
         """Run one throwaway inference so the first real frame is not stalled."""
