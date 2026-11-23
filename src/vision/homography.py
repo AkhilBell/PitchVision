@@ -116,6 +116,11 @@ class HomographyTransformer:
         )
         self.set_transform(src_pts, dst_pts)
 
+    def clear(self) -> None:
+        """Drop any stored homography so the next frame starts uncalibrated."""
+        self._matrix = None
+        self._inverse = None
+
     @property
     def is_calibrated(self) -> bool:
         """Whether a homography matrix has been set."""

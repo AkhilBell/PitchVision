@@ -1,7 +1,7 @@
 """Background QThread that drives the full PitchVision CV pipeline.
 
 The worker iterates over every frame of a video, runs detection →
-classification → homography → formation → heatmap, packages the
+classification → pitch calibration → formation → heatmap, packages the
 results into a :class:`~src.core.packet.FramePacket`, and emits it
 via the ``frame_ready`` signal so the UI can update in real time.
 
@@ -23,6 +23,7 @@ import logging
 import time
 from typing import Optional
 
+import cv2
 import numpy as np
 import supervision as sv
 from PySide6.QtCore import QThread, Signal
@@ -40,6 +41,7 @@ from src.core.video_io import frame_generator, get_video_properties
 from src.vision.ball_tracker import BallTracker
 from src.vision.detector import PlayerDetector
 from src.vision.homography import HomographyTransformer
+from src.vision.pitch_keypoints import PitchKeypointDetector
 from src.vision.team_classifier import TeamClassifier
 
 logger = logging.getLogger(__name__)
@@ -83,6 +85,15 @@ def _detections_to_players(
     return players
 
 
+def _frame_histogram(frame: np.ndarray) -> np.ndarray:
+    """Normalised grayscale histogram used for hard-cut detection."""
+    small = cv2.resize(frame, (64, 36), interpolation=cv2.INTER_AREA)
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    hist = cv2.calcHist([gray], [0], None, [32], [0, 256])
+    cv2.normalize(hist, hist)
+    return hist
+
+
 class PipelineWorker(QThread):
     """Process a video file through the full PitchVision pipeline.
 
@@ -116,6 +127,7 @@ class PipelineWorker(QThread):
             iou=config.IOU_THRESHOLD,
             device=config.DEVICE,
         )
+        self._pitch_detector = PitchKeypointDetector(device=config.DEVICE)
         self._ball_tracker = BallTracker()
         self._team_classifier = TeamClassifier()
         self._homography = HomographyTransformer(
@@ -127,13 +139,16 @@ class PipelineWorker(QThread):
             grid_shape=config.HEATMAP_GRID_RESOLUTION,
             sigma=config.HEATMAP_SIGMA,
         )
+        self._prev_hist: np.ndarray | None = None
+        self._smoothed_players: dict[int, tuple[float, float]] = {}
+        self._smoothed_ball: tuple[float, float] | None = None
 
     # ── Public API ──────────────────────────────────────────────────────
 
     @property
     def detector_description(self) -> str:
         """One-line summary of the detection models in use."""
-        return self._detector.description
+        return f"{self._detector.description} | {self._pitch_detector.description}"
 
     @property
     def heatmap_engine(self) -> HeatmapEngine:
@@ -186,6 +201,10 @@ class PipelineWorker(QThread):
                 if not self._running:
                     break
 
+                # ── 0. Hard-cut detection ────────────────────────────────
+                if self._is_scene_cut(frame):
+                    self._on_scene_cut()
+
                 # ── 1. Object detection + ball tracking ─────────────────
                 if self._ball_tracker.max_jump_px is None:
                     frame_h, frame_w = frame.shape[:2]
@@ -225,24 +244,33 @@ class PipelineWorker(QThread):
                                 team = "unknown"
                             player.team = team
 
-                # ── 3. Homography → pitch coordinates ───────────────────
-                if not self._homography.is_calibrated:
-                    h, w = frame.shape[:2]
-                    self._homography.set_default_transform(w, h)
+                # ── 3. Pitch keypoints → homography ─────────────────────
+                pitch_calibrated = self._calibrate_pitch(frame)
+                if pitch_calibrated:
+                    players = self._homography.transform_players(players)
+                    if ball is not None:
+                        ball = self._homography.transform_ball(ball)
+                    self._smooth_positions(players, ball)
+                else:
+                    # Close-up / cut / missing model: leave pitch_xy empty
+                    # so radar and heatmap freeze for this frame.
+                    for player in players:
+                        player.pitch_xy = None
+                    if ball is not None:
+                        ball.pitch_xy = None
 
-                players = self._homography.transform_players(players)
-                if ball is not None:
-                    ball = self._homography.transform_ball(ball)
-
-                homography_matrix: Optional[np.ndarray] = self._homography.matrix
+                homography_matrix: Optional[np.ndarray] = (
+                    self._homography.matrix if pitch_calibrated else None
+                )
 
                 # ── 4. Formation detection ──────────────────────────────
                 pitch_state: PitchState = self._formation_engine.detect_both_teams(
                     players
                 )
 
-                # ── 5. Heatmap accumulation ─────────────────────────────
-                self._heatmap_engine.update(players)
+                # ── 5. Heatmap accumulation (calibrated frames only) ────
+                if pitch_calibrated:
+                    self._heatmap_engine.update(players)
 
                 # ── 6. Package & emit ───────────────────────────────────
                 packet = FramePacket(
@@ -253,6 +281,7 @@ class PipelineWorker(QThread):
                     ball=ball,
                     pitch_state=pitch_state,
                     homography_matrix=homography_matrix,
+                    pitch_calibrated=pitch_calibrated,
                 )
                 # Hold the frame back only if the previous one was shown
                 # less than one frame interval ago.
@@ -271,3 +300,97 @@ class PipelineWorker(QThread):
         finally:
             # QThread emits its built-in ``finished`` signal when run() returns.
             logger.info("PipelineWorker finished")
+
+    # ── Pitch calibration helpers ───────────────────────────────────────
+
+    def _calibrate_pitch(self, frame: np.ndarray) -> bool:
+        """Estimate a per-frame homography from pitch landmarks.
+
+        Returns
+        -------
+        bool
+            ``True`` when a usable transform was set for this frame.
+        """
+        self._homography.clear()
+        pixel_xy, pitch_xy, _indices = self._pitch_detector.detect(frame)
+        if pixel_xy.shape[0] < config.PITCH_MIN_KEYPOINTS:
+            return False
+        try:
+            self._homography.set_transform(pixel_xy, pitch_xy)
+        except ValueError:
+            logger.debug(
+                "Homography failed with %d keypoints", pixel_xy.shape[0], exc_info=True
+            )
+            self._homography.clear()
+            return False
+        return self._homography.is_calibrated
+
+    def _is_scene_cut(self, frame: np.ndarray) -> bool:
+        """Return True when *frame* looks like a hard cut from the previous one."""
+        hist = _frame_histogram(frame)
+        cut = False
+        if self._prev_hist is not None:
+            corr = float(cv2.compareHist(self._prev_hist, hist, cv2.HISTCMP_CORREL))
+            cut = corr < config.SCENE_CUT_HIST_CORR
+        self._prev_hist = hist
+        return cut
+
+    def _on_scene_cut(self) -> None:
+        """Reset trackers and pitch state after a hard cut."""
+        logger.info("Scene cut detected — resetting tracker and pitch calibration")
+        try:
+            self._detector.tracker.reset()
+        except Exception:
+            logger.debug("Tracker reset failed", exc_info=True)
+        self._homography.clear()
+        self._smoothed_players.clear()
+        self._smoothed_ball = None
+        # Force a fresh ball search; IDs and last-ball position do not
+        # carry across a cut / replay / angle change.
+        self._ball_tracker = BallTracker(max_jump_px=self._ball_tracker.max_jump_px)
+
+    def _smooth_positions(
+        self,
+        players: list[PlayerState],
+        ball: Optional[BallState],
+    ) -> None:
+        """EMA-smooth pitch positions to reduce radar jitter."""
+        alpha = float(config.POSITION_SMOOTHING_ALPHA)
+        alpha = min(max(alpha, 0.0), 1.0)
+        live_ids: set[int] = set()
+
+        for player in players:
+            if player.pitch_xy is None:
+                continue
+            live_ids.add(player.track_id)
+            x, y = player.pitch_xy
+            prev = self._smoothed_players.get(player.track_id)
+            if prev is None or alpha >= 1.0:
+                smoothed = (x, y)
+            else:
+                smoothed = (
+                    alpha * x + (1.0 - alpha) * prev[0],
+                    alpha * y + (1.0 - alpha) * prev[1],
+                )
+            self._smoothed_players[player.track_id] = smoothed
+            player.pitch_xy = smoothed
+
+        # Drop tracks that left the frame so a recycled ID starts fresh.
+        for track_id in list(self._smoothed_players):
+            if track_id not in live_ids:
+                del self._smoothed_players[track_id]
+
+        if ball is not None and ball.pitch_xy is not None:
+            x, y = ball.pitch_xy
+            if self._smoothed_ball is None or alpha >= 1.0:
+                smoothed_ball = (x, y)
+            else:
+                px, py = self._smoothed_ball
+                smoothed_ball = (
+                    alpha * x + (1.0 - alpha) * px,
+                    alpha * y + (1.0 - alpha) * py,
+                )
+            self._smoothed_ball = smoothed_ball
+            ball.pitch_xy = smoothed_ball
+        else:
+            self._smoothed_ball = None

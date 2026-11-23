@@ -44,26 +44,30 @@ This installs: `ultralytics`, `supervision`, `trackers`, `opencv-python`, `PySid
 
 ### 4. Download the model weights
 
-PitchVision uses two soccer-trained YOLOv8 models published with the open-source [roboflow/sports](https://github.com/roboflow/sports) project. They are about 137 MB each and are not stored in this repository. Download them once into `models/weights/`, from the project root:
+PitchVision uses three soccer-trained YOLOv8 models published with the open-source [roboflow/sports](https://github.com/roboflow/sports) project. They are about 137–140 MB each and are not stored in this repository. Download them once into `models/weights/`, from the project root:
 
 ```bash
 curl -L "https://drive.usercontent.google.com/download?id=17PXFNlx-jI7VjVo_vQnB1sONjRyvoB-q&export=download&confirm=t" \
      -o models/weights/football-player-detection.pt
 curl -L "https://drive.usercontent.google.com/download?id=1isw4wx-MK9h9LMr36VvIWlJD6ppUvw7V&export=download&confirm=t" \
      -o models/weights/football-ball-detection.pt
+curl -L "https://drive.usercontent.google.com/download?id=1Ma5Kt86tgpdjCTKfum79YMgNnSjcoOyf&export=download&confirm=t" \
+     -o models/weights/football-pitch-detection.pt
 ```
 
 | File | What it finds |
 |------|---------------|
 | `football-player-detection.pt` | Players, goalkeepers and referees on the pitch (ignores crowd and bench) |
 | `football-ball-detection.pt` | The ball |
+| `football-pitch-detection.pt` | 32 pitch landmarks used to calibrate the camera each frame |
 
 The status bar shows which models are in use once a video is loaded. If a file is missing the app still runs, with weaker results:
 
 - No player model: falls back to the generic `yolov8n.pt` (downloaded automatically), which marks every person in the frame and cannot tell referees or goalkeepers apart.
 - No ball model: the ball is taken from the player model, which finds it far less often.
+- No pitch model: radar, heatmap and formation stay empty (no default stretch onto the pitch).
 
-To use different weights, update `MODEL_PATH` and `BALL_MODEL_PATH` in `src/config.py`. Check the licence terms of the weights (Ultralytics models are AGPL-3.0) before redistributing them.
+To use different weights, update `MODEL_PATH`, `BALL_MODEL_PATH` and `PITCH_MODEL_PATH` in `src/config.py`. Check the licence terms of the weights (Ultralytics models are AGPL-3.0) before redistributing them.
 
 ### 5. Launch the application
 
@@ -100,6 +104,7 @@ python3 -m src.main
 | **Show Foot Markers** | Team-colored ellipses at players' feet + ID badges |
 | **Show Formation Lines** | Formation cluster lines on the radar + formation labels |
 | **Ball Trail** | Ball position marker on the video |
+| **Pitch Lines** | Debug: project calibrated pitch markings back onto the video |
 
 ### Using the Heatmap
 
@@ -146,9 +151,9 @@ When you load a video, a background thread processes each frame through these st
 2. **ByteTrack Tracking** — Assigns persistent IDs to players across frames so the same player keeps the same number
 3. **Ball Tracking** — A dedicated ball model searches a small full-resolution window around the ball's last position (the whole frame when the ball is lost); detections that jump implausibly far are ignored and short gaps are filled with linear interpolation
 4. **Team Classification** — Referees and goalkeepers come from the detector; other players are split into Team A / Team B by clustering jersey colours with K-Means (fits once, on the first frame with enough players)
-5. **Homography Transform** — Maps pixel positions to real-world pitch coordinates (105×68 m)
-6. **Formation Detection** — Clusters outfield players by position along the pitch to identify tactical shapes (4-3-3, 4-4-2, etc.)
-7. **Heatmap Accumulation** — Increments a per-player 2D grid for spatial density visualization
+5. **Pitch Calibration** — A pose model finds pitch landmarks; with ≥ 4 confident points a per-frame homography maps pixels onto the 105×68 m pitch. Close-ups and cuts leave positions empty ("No pitch view"); hard cuts also reset the tracker
+6. **Formation Detection** — Clusters outfield players by position along the pitch to identify tactical shapes (4-3-3, 4-4-2, etc.) — only meaningful on calibrated frames
+7. **Heatmap Accumulation** — Increments a per-player 2D grid on calibrated frames only
 
 Each processed frame is emitted as a `FramePacket` to the UI thread, which updates all three panels simultaneously.
 
@@ -173,10 +178,11 @@ PitchVision/
     │   ├── video_io.py            ← Video reader generator + MP4 exporter
     │   └── pipeline_worker.py     ← QThread orchestrating the full pipeline
     ├── vision/
-    │   ├── detector.py            ← YOLO inference, roles, ball search + ByteTrack tracking
-    │   ├── ball_tracker.py        ← Ball selection, jump rejection, gap interpolation
-    │   ├── team_classifier.py     ← Jersey color K-Means clustering
-    │   └── homography.py          ← Pixel ↔ pitch coordinate transforms
+│   ├── detector.py            ← YOLO inference, roles, ball search + ByteTrack tracking
+│   ├── ball_tracker.py        ← Ball selection, jump rejection, gap interpolation
+│   ├── pitch_keypoints.py     ← Pitch landmark detection for per-frame homography
+│   ├── team_classifier.py     ← Jersey color K-Means clustering
+│   └── homography.py          ← Pixel ↔ pitch coordinate transforms
     ├── analytics/
     │   ├── heatmap_engine.py      ← 2D accumulator + Gaussian smoothing
     │   └── formation_engine.py    ← Spatial clustering + formation templates
@@ -202,6 +208,11 @@ All tunable parameters live in [`src/config.py`](src/config.py):
 | `BALL_SEARCH_WINDOW` | `(320, 192)` | Size in pixels of the window searched around the ball's last position |
 | `BALL_FULL_SEARCH_INTERVAL` | `5` | While the ball is lost, search the whole frame every N frames |
 | `BALL_MAX_JUMP_FRACTION` | `0.05` | Largest plausible ball movement per frame, as a fraction of the frame diagonal |
+| `PITCH_MODEL_PATH` | `models/weights/football-pitch-detection.pt` | Pitch landmark weights; `None` disables calibration |
+| `PITCH_CONFIDENCE_THRESHOLD` | `0.5` | Min per-keypoint confidence to keep a landmark |
+| `PITCH_MIN_KEYPOINTS` | `4` | Landmarks needed before a homography is estimated |
+| `SCENE_CUT_HIST_CORR` | `0.6` | Histogram correlation below which a hard cut is assumed |
+| `POSITION_SMOOTHING_ALPHA` | `0.4` | EMA weight on new pitch positions (1.0 = no smoothing) |
 | `CONFIDENCE_THRESHOLD` | `0.3` | Min detection confidence |
 | `IOU_THRESHOLD` | `0.5` | NMS IoU threshold |
 | `DEVICE` | `None` | Inference device (`"mps"`, `"cuda"`, `"cpu"`); `None` picks the fastest available |
@@ -217,7 +228,8 @@ All tunable parameters live in [`src/config.py`](src/config.py):
 
 - **Use broadcast footage** with a wide-angle view of the pitch for best detection coverage
 - **15–30 second clips** are ideal for initial testing
-- **Tactical cam (top-down)** video produces much better homography and formation accuracy than broadcast angle
+- **Wide broadcast shots** are required for pitch calibration; close-ups and replays show "No pitch view" and freeze the radar/heatmap until a wide shot returns
+- Turn on **Pitch Lines** in the status bar to check that projected markings sit on the real pitch lines while the camera pans
 - The team classifier needs **at least 3 visible players** to fit — it fits once, on the first frame that has enough players
 - Formation detection needs **at least 3 players per team** with valid pitch positions
 
@@ -231,8 +243,9 @@ All tunable parameters live in [`src/config.py`](src/config.py):
 | Window doesn't appear | Ensure PySide6 is installed: `pip install PySide6` |
 | No detections showing | Check the status bar for the models in use; download the weights with the commands in step 4 |
 | Crowd or bench staff get markers | The status bar says "generic fallback": the soccer player model is missing, see step 4 |
+| Radar stays empty / "No pitch view" | Download `football-pitch-detection.pt` (step 4); close-ups also pause calibration until a wide shot returns |
 | Slow FPS | Set `BALL_MODEL_PATH = None` in `config.py` to skip the separate ball search (faster, but the ball is found far less often) |
-| Heatmap is blank | Select a player from the dropdown — heatmap only shows after positions accumulate |
+| Heatmap is blank | Select a player from the dropdown — heatmap only builds on calibrated (wide) frames |
 
 ---
 

@@ -16,10 +16,14 @@ from PySide6.QtWidgets import QWidget
 
 from src.config import (
     BALL_COLOR,
+    PITCH_LANDMARK_EDGES,
+    PITCH_LANDMARKS_M,
+    PITCH_LINE_COLOR,
     REFEREE_COLOR,
     TEAM_A_COLOR,
     TEAM_B_COLOR,
 )
+from src.vision.homography import HomographyTransformer
 
 if TYPE_CHECKING:
     from PySide6.QtGui import QPaintEvent
@@ -43,6 +47,7 @@ class VideoCanvas(QWidget):
         self.show_ellipses: bool = True
         self.show_badges: bool = True
         self.show_ball: bool = True
+        self.show_pitch_lines: bool = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -142,7 +147,42 @@ class VideoCanvas(QWidget):
                 cv2.fillPoly(vis, [tri_pts], BALL_COLOR)
                 cv2.polylines(vis, [tri_pts], True, (255, 255, 255), 1, cv2.LINE_AA)
 
+        # -- Projected pitch lines (debug) --
+        if self.show_pitch_lines and getattr(packet, "pitch_calibrated", False):
+            self._draw_pitch_lines(vis, getattr(packet, "homography_matrix", None))
+
         return vis
+
+    def _draw_pitch_lines(
+        self, vis: np.ndarray, matrix: np.ndarray | None
+    ) -> None:
+        """Project pitch marking segments onto *vis* via the inverse homography."""
+        if matrix is None:
+            return
+        transformer = HomographyTransformer()
+        # Reuse the stored pixel→pitch matrix; pitch_to_pixel needs the inverse.
+        try:
+            inverse = np.linalg.inv(matrix)
+        except np.linalg.LinAlgError:
+            return
+        transformer._matrix = matrix
+        transformer._inverse = inverse
+
+        height, width = vis.shape[:2]
+        for i, j in PITCH_LANDMARK_EDGES:
+            p1 = transformer.pitch_to_pixel(PITCH_LANDMARKS_M[i])
+            p2 = transformer.pitch_to_pixel(PITCH_LANDMARKS_M[j])
+            if p1 is None or p2 is None:
+                continue
+            # Skip segments that land entirely off-frame (common on close-ups).
+            if (
+                (p1[0] < -width and p2[0] < -width)
+                or (p1[0] > 2 * width and p2[0] > 2 * width)
+                or (p1[1] < -height and p2[1] < -height)
+                or (p1[1] > 2 * height and p2[1] > 2 * height)
+            ):
+                continue
+            cv2.line(vis, p1, p2, PITCH_LINE_COLOR, 2, cv2.LINE_AA)
 
     @staticmethod
     def _team_color(team: str | None) -> tuple[int, int, int]:

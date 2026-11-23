@@ -6,13 +6,13 @@ Phases are ordered so that each one leaves the app in a working state and ends w
 
 Workflow: all work is committed directly to `main` and pushed to `origin/main`. No feature or backup branches.
 
-## Current state (17 Nov 2026)
+## Current state (23 Nov 2026)
 
 - **Load Video works** (Phase 1 done) and has been run through the real Load Video path on two real 30-second broadcast clips.
 - **Detection is soccer-specific** (Phase 3 done): only players, goalkeepers and referees on the pitch are marked, each with a role, and a ball position is available in 99-100% of frames on the two test clips.
-- **Speed is about 6 frames per second** on an Apple M3 with 1080p broadcast footage. Phase 2 took the generic detector from about 3 to about 8; the separate ball search added in Phase 3 costs about 1.5.
+- **Automatic pitch calibration works** (Phase 4 done): per-frame pitch landmarks drive a real homography; radar and heatmap only update on calibrated frames and freeze with "No pitch view" during close-ups; hard cuts reset the tracker; the Pitch Lines debug toggle projects markings back onto the video.
+- **Speed is a few frames per second** on an Apple M3 with 1080p broadcast footage (player + ball + pitch models). Real-time playback is still out of reach; a "process first, then play back" mode is the planned fix if it stays too slow after Phase 5.
 - **Team colours are not reliable yet**: on both test clips nearly every player is put in Team A. The cause is known and is Phase 5 work.
-- Pitch positions are not real. The video frame is simply stretched onto the pitch rectangle, so radar, formations and heatmaps are not meaningful on broadcast footage yet.
 - Export MP4 is a placeholder.
 
 ## Target pipeline
@@ -41,7 +41,7 @@ curl -L "https://drive.usercontent.google.com/download?id=12TqauVZ9tLAv8kWxTTBFW
 curl -L "https://drive.usercontent.google.com/download?id=1vVwjW1dE1drIdd4ZSILfbCGPD4weoNiu&export=download&confirm=t" -o data/samples/121364_0.mp4
 ```
 
-- [ ] Keep several GB of disk free; Phase 4 downloads another 140 MB of model weights.
+- [x] Keep several GB of disk free; Phase 4 downloads another 140 MB of model weights.
 - [ ] Add a clip from a different source (another league, broadcaster or camera style). The two test clips come from the same collection the detection models were trained on, so results on them are probably better than on unseen footage.
 
 ## Phase 1 - Make Load Video work (done, 17 Nov 2026)
@@ -113,21 +113,21 @@ Findings to carry forward:
 - Team colours are wrong on both clips (see Phase 5).
 - Roles are read frame by frame, so a track's role can flip when the model is unsure (for example between goalkeeper and player). How often this happens was not measured; Phase 5 should settle the role per track.
 
-## Phase 4 - Automatic pitch calibration
+## Phase 4 - Automatic pitch calibration (done, 23 Nov 2026)
 
-This is the core of broadcast support. Today positions come from a placeholder in `src/core/pipeline_worker.py`:
+This is the core of broadcast support. Positions previously came from a placeholder in `src/core/pipeline_worker.py`:
 
 ```python
 self._homography.set_default_transform(w, h)   # stretches the frame onto the pitch
 ```
 
-- [ ] Add `src/vision/pitch_keypoints.py`: detect pitch landmarks on each frame and keep the confident ones. Candidate model: `football-pitch-detection.pt` from the same repo (32 landmarks; not yet tested here).
-- [ ] Add the landmark positions in metres to `src/config.py`, scaled to this app's 105 x 68 pitch (the Roboflow table uses 120 x 70).
-- [ ] On each frame with 4 or more keypoints, call the existing `HomographyTransformer.set_transform(src, dst)`.
-- [ ] Remove the default-transform fallback. With no calibration, leave `pitch_xy` empty; radar, heatmap and formation code already skip empty positions.
-- [ ] Close-ups, replays and cuts: when too few keypoints are found, show video overlays only, pause radar and heatmap accumulation, and show "No pitch view" in the status bar. Detect hard cuts and reset the tracker, since IDs do not carry across a cut.
-- [ ] Smooth positions across frames to stop radar jitter.
-- [ ] Add a debug toggle that draws the projected pitch lines back onto the video using `pitch_to_pixel`.
+- [x] Add `src/vision/pitch_keypoints.py`: detect pitch landmarks on each frame and keep the confident ones (`football-pitch-detection.pt` from the same repo; 32 landmarks).
+- [x] Add the landmark positions in metres to `src/config.py`, scaled to this app's 105 x 68 pitch (the Roboflow table uses 120 x 70).
+- [x] On each frame with 4 or more keypoints, call the existing `HomographyTransformer.set_transform(src, dst)`.
+- [x] Remove the default-transform fallback. With no calibration, leave `pitch_xy` empty; radar, heatmap and formation code already skip empty positions.
+- [x] Close-ups, replays and cuts: when too few keypoints are found, show video overlays only, pause radar and heatmap accumulation, and show "No pitch view" in the status bar. Detect hard cuts (histogram correlation) and reset the tracker, since IDs do not carry across a cut.
+- [x] Smooth positions across frames to stop radar jitter (`POSITION_SMOOTHING_ALPHA`).
+- [x] Add a debug toggle ("Pitch Lines") that draws the projected pitch lines back onto the video using `pitch_to_pixel`.
 
 **Done when:** with the debug toggle on, the projected lines sit on the real pitch lines while the camera pans, and the radar freezes cleanly during close-ups.
 

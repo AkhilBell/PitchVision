@@ -37,10 +37,13 @@ class RadarWidget(QWidget):
         super().__init__(parent)
         self.setMinimumHeight(300)
 
-        # Data caches (updated every frame).
+        # Data caches (updated every frame).  When the current frame has no
+        # pitch calibration we keep the last calibrated snapshot so the
+        # radar freezes cleanly during close-ups instead of going blank.
         self._players: list[Any] = []
         self._ball: Any | None = None
         self._pitch_state: PitchState | None = None
+        self._pitch_calibrated: bool = False
 
         # Overlay toggle.
         self.show_formations: bool = True
@@ -57,9 +60,12 @@ class RadarWidget(QWidget):
         packet : FramePacket
             Latest pipeline output.
         """
-        self._players = getattr(packet, "players", []) or []
-        self._ball = getattr(packet, "ball", None)
-        self._pitch_state = getattr(packet, "pitch_state", None)
+        calibrated = bool(getattr(packet, "pitch_calibrated", False))
+        self._pitch_calibrated = calibrated
+        if calibrated:
+            self._players = getattr(packet, "players", []) or []
+            self._ball = getattr(packet, "ball", None)
+            self._pitch_state = getattr(packet, "pitch_state", None)
         self.update()  # schedule paintEvent
 
     # ------------------------------------------------------------------
@@ -198,6 +204,11 @@ class RadarWidget(QWidget):
                 getattr(self._pitch_state, "formation_lines_b", []),
                 QColor(*TEAM_B_COLOR_RGB, 120),
             )
+
+        if not self._pitch_calibrated:
+            painter.setPen(QPen(QColor(255, 220, 80)))
+            painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+            painter.drawText(_PAD, _PAD + 16, "No pitch view")
 
         painter.end()
 

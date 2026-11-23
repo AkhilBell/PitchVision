@@ -126,6 +126,10 @@ class FramePacket:
         Formation / tactical data, or ``None`` if not yet computed.
     homography_matrix : np.ndarray | None
         3 × 3 perspective transform mapping pixel → pitch coordinates.
+    pitch_calibrated : bool
+        ``True`` when this frame has a fresh pitch → pixel homography
+        from detected landmarks.  When ``False``, radar and heatmap
+        should freeze and ``pitch_xy`` values stay empty.
     """
 
     frame_index: int
@@ -135,3 +139,4 @@ class FramePacket:
     ball: Optional[BallState] = None
     pitch_state: Optional[PitchState] = None
     homography_matrix: Optional[np.ndarray] = None
+    pitch_calibrated: bool = False

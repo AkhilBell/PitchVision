@@ -132,6 +132,88 @@ BALL_MAX_JUMP_FRACTION: float = 0.05
 """Largest plausible ball movement per frame, as a fraction of the frame
 diagonal.  Detections further than this from the last position are ignored."""
 
+PITCH_MODEL_PATH: str | None = "models/weights/football-pitch-detection.pt"
+"""YOLO pose weights that find 32 pitch landmarks, or ``None`` to disable.
+
+When missing or disabled the pipeline never calibrates, so radar, heatmap
+and formation stay empty.  Relative paths are resolved against the
+project root.  The weights come from the same [roboflow/sports](
+https://github.com/roboflow/sports) release as the player and ball models.
+"""
+
+PITCH_CONFIDENCE_THRESHOLD: float = 0.5
+"""Minimum per-keypoint confidence to keep a pitch landmark."""
+
+PITCH_DETECTION_IMGSZ: int = 640
+"""Inference size for the pitch keypoint model (its training size)."""
+
+PITCH_MIN_KEYPOINTS: int = 4
+"""Minimum confident landmarks needed to estimate a homography."""
+
+# Pitch landmarks in metres on this app's 105 × 68 pitch.  They are the
+# 32 vertices from roboflow/sports' SoccerPitchConfiguration (120 × 70 m,
+# stored in cm) scaled by (105/120, 68/70).  Index order matches the
+# football-pitch-detection.pt keypoint order.
+PITCH_LANDMARKS_M: tuple[tuple[float, float], ...] = (
+    (0.0, 0.0),
+    (0.0, 14.0857),
+    (0.0, 25.1017),
+    (0.0, 42.8983),
+    (0.0, 53.9143),
+    (0.0, 68.0),
+    (4.8125, 25.1017),
+    (4.8125, 42.8983),
+    (9.625, 34.0),
+    (17.6313, 14.0857),
+    (17.6313, 25.1017),
+    (17.6313, 42.8983),
+    (17.6313, 53.9143),
+    (52.5, 0.0),
+    (52.5, 25.1114),
+    (52.5, 42.8886),
+    (52.5, 68.0),
+    (87.3688, 14.0857),
+    (87.3688, 25.1017),
+    (87.3688, 42.8983),
+    (87.3688, 53.9143),
+    (95.375, 34.0),
+    (100.1875, 25.1017),
+    (100.1875, 42.8983),
+    (105.0, 0.0),
+    (105.0, 14.0857),
+    (105.0, 25.1017),
+    (105.0, 42.8983),
+    (105.0, 53.9143),
+    (105.0, 68.0),
+    (44.4938, 34.0),
+    (60.5063, 34.0),
+)
+"""Pitch landmark positions in metres, indexed like the pose model."""
+
+# Edges connecting landmark indices (0-based), used to draw the projected
+# pitch outline back onto the video for the debug toggle.  Same topology
+# as roboflow/sports' SoccerPitchConfiguration.edges.
+PITCH_LANDMARK_EDGES: tuple[tuple[int, int], ...] = (
+    (0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (6, 7),
+    (9, 10), (10, 11), (11, 12), (13, 14), (14, 15),
+    (15, 16), (17, 18), (18, 19), (19, 20), (22, 23),
+    (24, 25), (25, 26), (26, 27), (27, 28), (28, 29),
+    (0, 13), (1, 9), (2, 6), (3, 7), (4, 12), (5, 16),
+    (13, 24), (17, 25), (22, 26), (23, 27), (20, 28), (16, 29),
+)
+"""Pairs of landmark indices that form pitch marking segments."""
+
+SCENE_CUT_HIST_CORR: float = 0.6
+"""Histogram correlation below which two consecutive frames are treated
+as a hard cut (replay, close-up jump, camera angle change)."""
+
+POSITION_SMOOTHING_ALPHA: float = 0.4
+"""EMA weight on the new pitch position each frame (0–1).
+
+``smoothed = alpha * new + (1 - alpha) * previous``.  Lower values damp
+radar jitter more aggressively; 1.0 disables smoothing.
+"""
+
 IOU_THRESHOLD: float = 0.5
 """IoU threshold for non-maximum suppression."""
 

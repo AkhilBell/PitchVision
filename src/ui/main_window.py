@@ -131,6 +131,14 @@ class MainWindow(QMainWindow):
         self._chk_ball_trail.stateChanged.connect(self._sync_overlay_flags)
         status.addPermanentWidget(self._chk_ball_trail)
 
+        self._chk_pitch_lines = QCheckBox("Pitch Lines")
+        self._chk_pitch_lines.setChecked(False)
+        self._chk_pitch_lines.setToolTip(
+            "Debug: project detected pitch markings back onto the video"
+        )
+        self._chk_pitch_lines.stateChanged.connect(self._sync_overlay_flags)
+        status.addPermanentWidget(self._chk_pitch_lines)
+
         self._progress = QProgressBar()
         self._progress.setFixedWidth(180)
         self._progress.setRange(0, 1)
@@ -145,6 +153,7 @@ class MainWindow(QMainWindow):
         self.video_canvas.show_ellipses = self._chk_foot_markers.isChecked()
         self.video_canvas.show_badges = self._chk_foot_markers.isChecked()
         self.video_canvas.show_ball = self._chk_ball_trail.isChecked()
+        self.video_canvas.show_pitch_lines = self._chk_pitch_lines.isChecked()
         self.radar_widget.show_formations = self._chk_formation_lines.isChecked()
 
     # ------------------------------------------------------------------
@@ -210,7 +219,8 @@ class MainWindow(QMainWindow):
         self.video_canvas.update_frame(packet)
         self.radar_widget.update_data(packet)
 
-        # Heatmap widget: feed players and refresh.
+        # Heatmap widget: feed players and refresh (engine only accumulates
+        # on calibrated frames, so this redraw freezes during close-ups).
         self.heatmap_widget.update_players(packet.players)
         self.heatmap_widget.update_heatmap()
 
@@ -221,6 +231,14 @@ class MainWindow(QMainWindow):
             self._lbl_fps.setText(f"FPS: {fps:.1f}")
             self._fps_window_start = time.monotonic()
             self._fps_window_frames = 0
+
+        # Status: advertise missing pitch view during close-ups / cuts.
+        if self._worker is not None:
+            base = self._worker.detector_description
+            if packet.pitch_calibrated:
+                self.statusBar().showMessage(base)
+            else:
+                self.statusBar().showMessage(f"No pitch view | {base}")
 
     def _on_progress(self, frame_index: int, total_frames: int) -> None:
         """Advance the progress bar; *frame_index* is zero-based."""
