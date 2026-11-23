@@ -34,8 +34,10 @@ class TeamClassifier:
 
     def __init__(self) -> None:
         self._kmeans: KMeans | None = None
+        self._centers: np.ndarray | None = None
         self._cluster_to_team: dict[int, str] = {}
         self._fitted: bool = False
+        self._samples: list[np.ndarray] = []
         self._votes: dict[int, Counter[str]] = {}
         self._settled: dict[int, str] = {}
 
@@ -49,34 +51,43 @@ class TeamClassifier:
         detections: sv.Detections,
         roles: list[str] | None = None,
     ) -> bool:
-        """Fit a 2-team colour model from outfield player detections.
+        """Add this frame's jersey colours and fit once the kits separate.
 
-        Goalkeepers and referees are skipped.  Returns ``True`` when the
-        model was fitted successfully.
+        Samples accumulate across frames so a shot of mostly one team does
+        not define both colours. The fit is kept only when the two colours
+        are far apart and both clusters are large enough (a white kit and
+        a blue kit, for example, rather than two shades of the same shirt).
         """
-        features: list[np.ndarray] = []
+        if self._fitted:
+            return True
+
         for i, bbox in enumerate(detections.xyxy):
             if roles is not None and roles[i] != "player":
                 continue
             feature = self._jersey_feature(frame, tuple(int(v) for v in bbox))
             if feature is not None:
-                features.append(feature)
+                self._samples.append(feature)
 
-        if len(features) < config.TEAM_FIT_MIN_PLAYERS:
+        if len(self._samples) > 80:
+            self._samples = self._samples[-80:]
+        if len(self._samples) < config.TEAM_FIT_MIN_PLAYERS:
             return False
 
-        colour_array = np.asarray(features, dtype=np.float64)
-        self._kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
-        labels = self._kmeans.fit_predict(colour_array)
-
-        # Larger cluster → Team A (stable label across runs; size is only
-        # a tie-break, not a semantic "home" assignment).
+        colour_array = np.asarray(self._samples, dtype=np.float64)
+        kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
+        labels = kmeans.fit_predict(colour_array)
         counts = Counter(int(label) for label in labels)
+        smaller = min(counts.values())
+        if smaller / len(labels) < config.TEAM_MIN_CLUSTER_FRACTION:
+            return False
+        centers = kmeans.cluster_centers_
+        if float(np.linalg.norm(centers[0] - centers[1])) < config.TEAM_MIN_CENTER_DISTANCE:
+            return False
+
         ordered = [cid for cid, _ in counts.most_common()]
-        self._cluster_to_team = {
-            ordered[0]: "A",
-            ordered[1]: "B",
-        }
+        self._kmeans = kmeans
+        self._centers = centers
+        self._cluster_to_team = {ordered[0]: "A", ordered[1]: "B"}
         self._fitted = True
         return True
 
@@ -107,13 +118,16 @@ class TeamClassifier:
         if not self._fitted or self._kmeans is None:
             return "unknown"
         feature = self._jersey_feature(frame, bbox)
-        if feature is None:
+        if feature is None or self._centers is None:
             return "unknown"
-        try:
-            cluster = int(self._kmeans.predict(feature.reshape(1, -1))[0])
-        except Exception:
+        distances = np.linalg.norm(self._centers - feature, axis=1)
+        order = np.argsort(distances)
+        nearest, second = int(order[0]), int(order[1])
+        # A white shirt with a blue number, or the reverse, lands between
+        # the two kits. Skip it instead of voting for the wrong team.
+        if distances[second] < distances[nearest] * 1.35:
             return "unknown"
-        return self._cluster_to_team.get(cluster, "unknown")
+        return self._cluster_to_team.get(nearest, "unknown")
 
     def clear_tracks(self) -> None:
         """Drop per-track votes after a scene cut (IDs are reused)."""
@@ -180,13 +194,23 @@ class TeamClassifier:
 
         hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
         h, s, v = cv2.split(hsv)
-        grass = (h >= 35) & (h <= 95) & (s >= 40) & (v >= 40) & (v <= 220)
+        # Green only. A wider band used to swallow blue and teal shirts,
+        # so a blue kit and a white kit both collapsed to skin tone.
+        grass = (h >= 35) & (h <= 85) & (s >= 40) & (v >= 40)
+        # White kit: bright and nearly unsaturated. Scaled so it can
+        # separate white from blue, which are close in raw LAB.
+        white = (s <= 45) & (v >= 150)
 
         lab = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2LAB).reshape(-1, 3).astype(np.float32)
+        flat_white = white.reshape(-1)
         mask = (~grass).reshape(-1)
         kept = lab[mask]
+        kept_white = flat_white[mask]
         if len(kept) < max(10, int(0.15 * len(lab))):
             kept = lab
+            kept_white = flat_white
         if len(kept) == 0:
             return None
-        return np.median(kept, axis=0).astype(np.float64)
+        median = np.median(kept, axis=0)
+        white_score = float(kept_white.mean()) * 100.0
+        return np.array([median[0], median[1], median[2], white_score], dtype=np.float64)

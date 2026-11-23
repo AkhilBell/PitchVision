@@ -155,6 +155,7 @@ class PipelineWorker(QThread):
         self._cached_ball: Optional[BallState] = None
         self._cached_calibrated: bool = False
         self._cached_matrix: Optional[np.ndarray] = None
+        self._cached_pitch: Optional[PitchState] = None
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -197,12 +198,14 @@ class PipelineWorker(QThread):
             )
 
             source_fps = float(props["fps"] or config.PLAYBACK_FPS)
-            # Show frames at about 24 fps. Analysis cannot keep up with
-            # that on every frame, so it runs on a stride (see below).
+            # Pace the picture at the file's frame rate, up to 30. Player
+            # tracking runs most frames; pitch and ball run less often.
             target_fps = min(float(config.PLAYBACK_FPS), float(config.MAX_FPS), source_fps)
             frame_interval = 1.0 / target_fps
             next_emit_at = 0.0
-            stride = max(1, int(config.ANALYSIS_STRIDE))
+            player_stride = max(1, int(config.PLAYER_STRIDE))
+            pitch_stride = max(player_stride, int(config.PITCH_STRIDE))
+            ball_stride = max(player_stride, int(config.BALL_STRIDE))
             hold_frames = max(1, int(config.OFFSCREEN_HOLD_S * source_fps))
             self._heatmap_engine.set_clip_frames(total_frames)
             # First inference on the GPU is several times slower than the
@@ -224,13 +227,20 @@ class PipelineWorker(QThread):
                 if self._is_scene_cut(frame):
                     self._on_scene_cut()
 
-                analyse = (
-                    self._cached_players is None
-                    or frame_index % stride == 0
+                run_players = (
+                    self._cached_players is None or frame_index % player_stride == 0
                 )
-                if analyse:
+                run_pitch = run_players and (
+                    frame_index % pitch_stride == 0 or not self._cached_calibrated
+                )
+                run_ball = run_players and frame_index % ball_stride == 0
+                if run_players or run_pitch:
                     players, ball, pitch_calibrated = self._analyse_frame(
-                        frame, frame_index
+                        frame,
+                        frame_index,
+                        run_players=run_players,
+                        run_pitch=run_pitch,
+                        run_ball=run_ball,
                     )
                     self._cached_players = players
                     self._cached_ball = ball
@@ -244,9 +254,16 @@ class PipelineWorker(QThread):
                     pitch_calibrated = self._cached_calibrated
 
                 # Remember players who just left the frame so the formation
-                # can still count them. Never invent someone we have not seen.
+                # can still count them, then drop anyone past 11 per team.
                 roster = self._roster_with_offscreen(players, frame_index, hold_frames)
-                pitch_state = self._smoothed_formation(roster, fresh=analyse)
+                roster = self._cap_roster(roster)
+                # Formation clustering is much more expensive than drawing,
+                # so it runs only on frames that tracked players again.
+                if run_players or self._cached_pitch is None:
+                    pitch_state = self._smoothed_formation(roster, fresh=True)
+                    self._cached_pitch = pitch_state
+                else:
+                    pitch_state = self._cached_pitch
 
                 # One count per video frame, on-screen players only, and
                 # only while the camera is calibrated. Dividing by the
@@ -336,28 +353,48 @@ class PipelineWorker(QThread):
         self._cached_ball = None
         self._cached_calibrated = False
         self._cached_matrix = None
+        self._cached_pitch = None
         # Force a fresh ball search; IDs and last-ball position do not
         # carry across a cut / replay / angle change.
         self._ball_tracker = BallTracker(max_jump_px=self._ball_tracker.max_jump_px)
 
     def _analyse_frame(
-        self, frame: np.ndarray, frame_index: int
+        self,
+        frame: np.ndarray,
+        frame_index: int,
+        run_players: bool,
+        run_pitch: bool,
+        run_ball: bool,
     ) -> tuple[list[PlayerState], Optional[BallState], bool]:
-        """Run detection, teams and pitch calibration on one frame."""
+        """Detect players, and optionally the ball and the pitch.
+
+        Player tracking is what keeps identities stable, so it runs most
+        often. The ball search and the pitch model are skipped on the
+        frames in between and the previous result is reused.
+        """
         if self._ball_tracker.max_jump_px is None:
             frame_h, frame_w = frame.shape[:2]
             self._ball_tracker.max_jump_px = (
                 config.BALL_MAX_JUMP_FRACTION * float(np.hypot(frame_w, frame_h))
             )
 
-        player_dets, ball_dets = self._detector.detect(
-            frame, ball_hint=self._ball_tracker.search_center
-        )
-        roles = self._detector.roles(player_dets)
-        players = _detections_to_players(player_dets, roles)
-        ball: Optional[BallState] = self._ball_tracker.update(frame_index, ball_dets)
+        if run_players:
+            player_dets, ball_dets = self._detector.detect(
+                frame,
+                ball_hint=self._ball_tracker.search_center,
+                run_ball=run_ball,
+            )
+            roles = self._detector.roles(player_dets)
+            players = _detections_to_players(player_dets, roles)
+            if run_ball:
+                ball = self._ball_tracker.update(frame_index, ball_dets)
+            else:
+                ball = self._cached_ball
+        else:
+            players = [replace(player, offscreen=False) for player in (self._cached_players or [])]
+            ball = self._cached_ball
 
-        if players:
+        if run_players and players:
             for player in players:
                 player.role = self._observe_role(player.track_id, player.role)
 
@@ -374,19 +411,26 @@ class PipelineWorker(QThread):
                         player.track_id, frame, player.bbox
                     )
 
-        pitch_calibrated = self._calibrate_pitch(frame)
+        if run_pitch:
+            pitch_calibrated = self._calibrate_pitch(frame)
+        else:
+            pitch_calibrated = self._homography.is_calibrated
+
         if pitch_calibrated:
             players = self._homography.transform_players(players)
-            if ball is not None:
+            if ball is not None and run_ball:
                 ball = self._homography.transform_ball(ball)
-            self._smooth_positions(players, ball)
+            elif ball is not None and ball.pitch_xy is None:
+                ball = self._homography.transform_ball(ball)
+            if run_players:
+                self._smooth_positions(players, ball if run_ball else None)
         else:
             for player in players:
                 player.pitch_xy = None
             if ball is not None:
                 ball.pitch_xy = None
 
-        if players:
+        if run_players and players:
             self._assign_goalkeeper_teams(players)
         return players, ball, pitch_calibrated
 
@@ -413,6 +457,40 @@ class PipelineWorker(QThread):
                 continue
             roster.append(replace(snap, offscreen=True))
         return roster
+
+    def _cap_roster(self, roster: list[PlayerState]) -> list[PlayerState]:
+        """Keep at most 11 icons per team and 22 players in total.
+
+        People on screen beat remembered ones, and a lower track id beats
+        a newly minted one. That stops a camera pan from leaving the old
+        dot on the map and adding a second dot for the same player.
+        Referees are not part of the 22.
+        """
+
+        def rank(player: PlayerState) -> tuple[bool, int]:
+            return (bool(player.offscreen), player.track_id)
+
+        refs = [
+            player
+            for player in roster
+            if player.role == "referee" or player.team == "ref"
+        ]
+        ref_ids = {id(player) for player in refs}
+        grouped: dict[str, list[PlayerState]] = {"A": [], "B": [], "other": []}
+        for player in roster:
+            if id(player) in ref_ids:
+                continue
+            key = player.team if player.team in ("A", "B") else "other"
+            grouped[key].append(player)
+
+        kept: list[PlayerState] = []
+        for team in ("A", "B"):
+            kept.extend(sorted(grouped[team], key=rank)[: config.MAX_PLAYERS_PER_TEAM])
+        room = config.MAX_PLAYER_ICONS - len(kept)
+        kept.extend(sorted(grouped["other"], key=rank)[: max(0, room)])
+        if len(kept) > config.MAX_PLAYER_ICONS:
+            kept = sorted(kept, key=rank)[: config.MAX_PLAYER_ICONS]
+        return kept + refs
 
     def _smoothed_formation(
         self, players: list[PlayerState], fresh: bool

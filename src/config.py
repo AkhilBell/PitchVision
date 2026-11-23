@@ -101,11 +101,12 @@ referees or goalkeepers apart.
 CONFIDENCE_THRESHOLD: float = 0.3
 """Minimum detection confidence for YOLO predictions."""
 
-DETECTION_IMGSZ: int = 640
+DETECTION_IMGSZ: int = 512
 """Longest side, in pixels, of the image the people model runs on.
 
-Without an explicit size the soccer model uses its training size (1280),
-which is about three times slower and finds roughly the same people.
+512 is a step down from the model's comfortable 640 so the tracker can
+run often enough to keep identities, while still finding the players a
+1280 pass would find. Larger is slower.
 """
 
 BALL_MODEL_PATH: str | None = "models/weights/football-ball-detection.pt"
@@ -250,11 +251,34 @@ is fixed for the whole video, so the picture is only complete at the end.
 """
 
 # ── Team / identity ─────────────────────────────────────────────────────────
-TEAM_FIT_MIN_PLAYERS: int = 8
-"""Minimum outfield players in one frame before jersey colours are fitted."""
+TEAM_FIT_MIN_PLAYERS: int = 16
+"""Jersey samples collected across frames before a two-team fit is attempted.
+
+One frame is not enough: the camera often shows mostly one kit, and a
+fit on that frame paints everyone the same colour.
+"""
+
+TEAM_MIN_CLUSTER_FRACTION: float = 0.28
+"""Smaller team must be at least this share of the samples, or the fit is rejected."""
+
+TEAM_MIN_CENTER_DISTANCE: float = 35.0
+"""Minimum distance between the two kit colours. Below this they are the
+same kit seen in different light, and the fit is rejected.
+"""
 
 TEAM_VOTE_SETTLE: int = 5
 """Colour observations needed before a track's team label is locked."""
+
+MAX_PLAYERS_PER_TEAM: int = 11
+"""Most outfield players plus a goalkeeper kept for one team on the radar."""
+
+MAX_PLAYER_ICONS: int = 22
+"""Most player icons on the radar at once (two teams of 11).
+
+Referees are extra. Off-screen memories are dropped first when a newly
+seen player would push a team past 11, so panning the camera cannot
+pile up a new dot for someone who is already on the map.
+"""
 
 ROLE_VOTE_SETTLE: int = 5
 """Role observations needed before a track's role is locked."""
@@ -284,21 +308,33 @@ keep accumulating for them.
 MAX_FPS: int = 30
 """Maximum frames-per-second for real-time playback."""
 
-PLAYBACK_FPS: float = 24.0
-"""Target rate for showing video frames.
+PLAYBACK_FPS: float = 30.0
+"""Target rate for showing video frames, capped by the file's own frame rate.
 
-The three detection models cannot run at this rate. Heavy analysis runs
-every ``ANALYSIS_STRIDE`` frames and the frames in between reuse that
-result, so the picture moves at about this speed while overlays refresh
-a few times a second.
+The picture is paced to this rate. Player tracking runs every
+``PLAYER_STRIDE`` frames so identities stay stable; the slower pitch and
+ball models run less often and their last result is reused.
 """
 
-ANALYSIS_STRIDE: int = 12
-"""Run player, ball and pitch models on every Nth frame.
+PLAYER_STRIDE: int = 3
+"""Run the player detector and tracker every Nth frame.
 
-``12`` leaves about half a second for one analysis, which is what the
-three models cost on an Apple M3, so the other frames can be shown at
-about 24 fps. Set to ``1`` to analyse every frame (slow motion playback).
+Three frames is about a tenth of a second, short enough for ByteTrack to
+keep the same ID and long enough that playback can reach the video's own
+frame rate (about 25 fps on the test clips). ``1`` tracks every frame
+and plays slower.
+"""
+
+PITCH_STRIDE: int = 15
+"""Re-estimate the pitch homography every Nth frame.
+
+The camera pans slowly, so the previous homography is reused in between.
+"""
+
+BALL_STRIDE: int = 9
+"""Run the dedicated ball search every Nth frame.
+
+The last ball position is held on the frames in between.
 """
 
 VIDEO_EXPORT_CODEC: str = "mp4v"

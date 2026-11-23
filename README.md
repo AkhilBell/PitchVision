@@ -204,7 +204,7 @@ All tunable parameters live in [`src/config.py`](src/config.py):
 | `MODEL_PATH` | `models/weights/football-player-detection.pt` | Player/goalkeeper/referee weights (relative paths are taken from the project root) |
 | `BALL_MODEL_PATH` | `models/weights/football-ball-detection.pt` | Ball weights; `None` uses the main model for the ball |
 | `FALLBACK_MODEL_PATH` | `models/weights/yolov8n.pt` | Generic model used when `MODEL_PATH` is missing |
-| `DETECTION_IMGSZ` | `640` | Image size the player model runs on; larger is slower |
+| `DETECTION_IMGSZ` | `512` | Image size the player model runs on; larger is slower |
 | `BALL_SEARCH_WINDOW` | `(320, 192)` | Size in pixels of the window searched around the ball's last position |
 | `BALL_FULL_SEARCH_INTERVAL` | `5` | While the ball is lost, search the whole frame every N frames |
 | `BALL_MAX_JUMP_FRACTION` | `0.05` | Largest plausible ball movement per frame, as a fraction of the frame diagonal |
@@ -223,8 +223,11 @@ All tunable parameters live in [`src/config.py`](src/config.py):
 | `HEATMAP_SIGMA` | `2.5` | Gaussian blur for heatmaps |
 | `PITCH_LENGTH` | `105.0` | Pitch length in metres |
 | `PITCH_WIDTH` | `68.0` | Pitch width in metres |
-| `PLAYBACK_FPS` | `24` | Target speed for showing the video |
-| `ANALYSIS_STRIDE` | `12` | Run the heavy models every Nth frame (`1` = every frame, much slower) |
+| `PLAYBACK_FPS` | `30` | Target speed for showing the video, capped by the file |
+| `PLAYER_STRIDE` | `3` | Run player tracking every Nth frame |
+| `PITCH_STRIDE` | `15` | Re-estimate the pitch every Nth frame |
+| `BALL_STRIDE` | `9` | Run the ball search every Nth frame |
+| `MAX_PLAYER_ICONS` | `22` | Most player dots on the radar (11 per team) |
 | `FORMATION_MIN_OUTFIELD` | `7` | Outfield players needed before a formation is named |
 | `OFFSCREEN_HOLD_S` | `2.5` | Seconds a player who left the frame still counts in the formation |
 | `HEATMAP_VMAX_FRACTION` | `0.12` | Clip share that maps to the hottest heatmap colour |

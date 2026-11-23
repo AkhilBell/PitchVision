@@ -12,7 +12,7 @@ Workflow: all work is committed directly to `main` and pushed to `origin/main`. 
 - **Detection is soccer-specific** (Phase 3 done): only players, goalkeepers and referees on the pitch are marked, each with a role, and a ball position is available in 99-100% of frames on the two test clips.
 - **Automatic pitch calibration works** (Phase 4 done): per-frame pitch landmarks drive a real homography; radar and heatmap only update on calibrated frames and freeze with "No pitch view" during close-ups; hard cuts reset the tracker; the Pitch Lines debug toggle projects markings back onto the video.
 - **Team colours are stable** (Phase 5 done): jersey features ignore grass, teams are fitted once on outfield players, and each track's team and role are majority-voted (no mid-clip flips on the test clips). Goalkeepers take the nearest team's side. The heatmap dropdown labels by team and hides short-lived IDs.
-- **Formations and heatmaps** (Phase 6 done): each team is oriented from its own goalkeeper; a formation is shown only when enough outfield players are on screen or were seen in the last few seconds (off-camera players keep their last pitch position). Heatmaps are a share of the full clip, not a per-player peak. Video is shown at about 24 fps by analysing every 12th frame.
+- **Formations and heatmaps** (Phase 6 done): each team is oriented from its own goalkeeper; a formation is shown only when enough outfield players are on screen or were seen in the last few seconds. Heatmaps are a share of the full clip. The radar keeps at most 22 player icons (11 a side). Playback targets the video's own frame rate up to 30 fps: players are tracked every 2nd frame, pitch and ball less often. Team colours are fit only once both kits are clearly different, so a white team and a blue team are not merged.
 - Export MP4 is a placeholder.
 
 ## Target pipeline
@@ -152,7 +152,7 @@ Known limit: an ID is a tracker number, not a shirt number, and a player gets a 
 - [x] Only report a formation when at least `FORMATION_MIN_OUTFIELD` outfield players are available, and smooth the label over the last few seconds; otherwise show a dash.
 - [x] Players who leave the frame keep their last pitch position for `OFFSCREEN_HOLD_S` (hollow dots on the radar) so a formation is not built only from whoever the camera currently shows. They are not invented if never seen, and a cut drops them. Heatmaps do not keep counting them.
 - [x] Accumulate heatmaps only on calibrated frames. Scale each cell by the full clip length (`frames there / total frames`) with a fixed colour range, so a short pause does not look like the whole game. Add a team heatmap option (`Team A (all)` / `Team B (all)`).
-- [x] Play the video at about 24 fps. The three models cannot run that fast, so they run every `ANALYSIS_STRIDE` frames (default 12) and the frames in between reuse that result. The models are warmed up once before the first frame.
+- [x] Play the video near its own frame rate, up to 30 fps. The three models cannot all run that fast, so player tracking runs every `PLAYER_STRIDE` frames and the pitch and ball models run less often. The models are warmed up once before the first frame. The radar is capped at 22 player icons.
 
 **Done when:** the formation label is steady during wide shots and blank otherwise.
 

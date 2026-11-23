@@ -182,6 +182,7 @@ class PlayerDetector:
         self,
         frame: np.ndarray,
         ball_hint: tuple[float, float] | None = None,
+        run_ball: bool = True,
     ) -> tuple[sv.Detections, sv.Detections]:
         """Run detection and tracking on a single video frame.
 
@@ -193,6 +194,9 @@ class PlayerDetector:
             Pixel position where the ball was last seen, or *None* when
             the ball is currently lost.  Used to search for the ball in a
             small window instead of the whole frame.
+        run_ball : bool
+            When ``False``, skip the dedicated ball model and return no
+            ball detections. The caller keeps the previous ball position.
 
         Returns
         -------
@@ -225,7 +229,7 @@ class PlayerDetector:
         except Exception:
             pass  # Fall back to un-tracked detections.
 
-        if self.ball_model is not None:
+        if run_ball and self.ball_model is not None:
             dedicated = self._detect_ball(frame, ball_hint)
             # The main model's ball class is a free second opinion on
             # frames where the dedicated search finds nothing.
