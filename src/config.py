@@ -312,7 +312,8 @@ PLAYBACK_FPS: float = 30.0
 """Target rate for the replay after analysis, capped by the file's own rate.
 
 The models are too slow to drive the picture directly, so the clip is
-analysed first and then replayed at this rate with the saved overlays.
+analysed first. Teams, formations, and marker paths are then settled
+from the whole clip, and only after that is it replayed at this rate.
 Player tracking still runs every ``PLAYER_STRIDE`` frames during analysis.
 """
 

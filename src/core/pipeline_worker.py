@@ -62,6 +62,43 @@ class _StoredFrame:
     pitch_calibrated: bool
 
 
+def _lerp_point(
+    start: tuple[int, int] | None, end: tuple[int, int] | None, blend: float
+) -> tuple[int, int]:
+    """Integer point ``blend`` of the way from *start* to *end*."""
+    if start is None or end is None:
+        return start or end or (0, 0)
+    return (
+        int(round(start[0] + (end[0] - start[0]) * blend)),
+        int(round(start[1] + (end[1] - start[1]) * blend)),
+    )
+
+
+def _lerp_box(
+    start: tuple[int, int, int, int],
+    end: tuple[int, int, int, int],
+    blend: float,
+) -> tuple[int, int, int, int]:
+    """Integer box ``blend`` of the way from *start* to *end*."""
+    return tuple(
+        int(round(start[i] + (end[i] - start[i]) * blend)) for i in range(4)
+    )  # type: ignore[return-value]
+
+
+def _lerp_pitch(
+    start: tuple[float, float] | None,
+    end: tuple[float, float] | None,
+    blend: float,
+) -> tuple[float, float] | None:
+    """Pitch point ``blend`` of the way from *start* to *end*."""
+    if start is None or end is None:
+        return start if start is not None else end
+    return (
+        start[0] + (end[0] - start[0]) * blend,
+        start[1] + (end[1] - start[1]) * blend,
+    )
+
+
 def _detections_to_players(
     detections: sv.Detections, roles: list[str] | None = None
 ) -> list[PlayerState]:
@@ -172,6 +209,7 @@ class PipelineWorker(QThread):
         self._cached_matrix: Optional[np.ndarray] = None
         self._cached_pitch: Optional[PitchState] = None
         self._playing_back: bool = False
+        self._is_scene_cut_frame: bool = False
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -255,6 +293,8 @@ class PipelineWorker(QThread):
             # a result for every frame as fast as it can. Playback then
             # replays the file at full speed without running them again.
             stored: list[_StoredFrame] = []
+            segments: list[int] = [0]
+            self._is_scene_cut_frame = False
             last_preview = 0.0
 
             for frame_index, timestamp_ms, frame in _all_frames():
@@ -269,7 +309,10 @@ class PipelineWorker(QThread):
                     break
 
                 # ── 0. Hard-cut detection ────────────────────────────────
-                if self._is_scene_cut(frame):
+                # A cut starts a new segment. Teams and formations are
+                # settled inside each segment, because track IDs restart.
+                self._is_scene_cut_frame = self._is_scene_cut(frame)
+                if self._is_scene_cut_frame:
                     self._on_scene_cut()
 
                 run_players = (
@@ -302,13 +345,9 @@ class PipelineWorker(QThread):
                 # can still count them, then drop anyone past 11 per team.
                 roster = self._roster_with_offscreen(players, frame_index, hold_frames)
                 roster = self._cap_roster(roster)
-                # Formation clustering is much more expensive than drawing,
-                # so it runs only on frames that tracked players again.
-                if run_players or self._cached_pitch is None:
-                    pitch_state = self._smoothed_formation(roster, fresh=True)
-                    self._cached_pitch = pitch_state
-                else:
-                    pitch_state = self._cached_pitch
+                # Formations are decided after the whole clip is known, so
+                # the opening frames can carry the same shape as the rest.
+                pitch_state = PitchState()
 
                 # One count per video frame, on-screen players only, and
                 # only while the camera is calibrated. Dividing by the
@@ -322,29 +361,21 @@ class PipelineWorker(QThread):
                 stored.append(
                     self._snapshot(roster, ball, pitch_state, matrix, pitch_calibrated)
                 )
+                if self._is_scene_cut_frame and frame_index != segments[-1]:
+                    segments.append(frame_index)
                 now = time.monotonic()
                 if frame_index == 0 or now - last_preview >= 0.25:
                     done = frame_index + 1
                     self.status.emit(
-                        f"Analysing… {done}/{total_frames}. "
-                        "Full-speed playback starts when this finishes."
-                    )
-                    self.frame_ready.emit(
-                        FramePacket(
-                            frame_index=frame_index,
-                            timestamp_ms=timestamp_ms,
-                            raw_frame=frame,
-                            players=stored[-1].players,
-                            ball=stored[-1].ball,
-                            pitch_state=stored[-1].pitch_state,
-                            homography_matrix=stored[-1].homography_matrix,
-                            pitch_calibrated=pitch_calibrated,
-                        )
+                        f"Analysing… {done}/{max(total_frames, done)}. "
+                        "The video plays when this finishes."
                     )
                     last_preview = now
                 self.progress.emit(frame_index, total_frames)
 
             if self._running and stored:
+                self.status.emit("Finishing teams and formations…")
+                self._compose_recording(stored, segments)
                 self._play_recording(stored, source_fps, total_frames)
 
         except FileNotFoundError as exc:
@@ -377,6 +408,154 @@ class PipelineWorker(QThread):
             homography_matrix=None if matrix is None else np.array(matrix, copy=True),
             pitch_calibrated=pitch_calibrated,
         )
+
+    def _compose_recording(self, stored: list[_StoredFrame], segments: list[int]) -> None:
+        """Settle teams, formations, and paths using the whole clip.
+
+        Analysis only knows what it has seen so far, so the opening frames
+        would otherwise have no team colour and no formation. Each stretch
+        between hard cuts is finished before playback starts.
+        """
+        bounds = [*segments, len(stored)]
+        for start, end in zip(bounds, bounds[1:]):
+            if end <= start:
+                continue
+            self._settle_identities(stored, start, end)
+            self._smooth_motion(stored, start, end)
+            self._settle_formations(stored, start, end)
+
+    def _settle_identities(self, stored: list[_StoredFrame], start: int, end: int) -> None:
+        """Give every appearance of a track the team and role it ended up with."""
+        teams: dict[int, Counter[str]] = {}
+        roles: dict[int, Counter[str]] = {}
+        for frame in stored[start:end]:
+            for player in frame.players:
+                if player.offscreen:
+                    continue
+                roles.setdefault(player.track_id, Counter())[player.role] += 1
+                if player.team in ("A", "B"):
+                    teams.setdefault(player.track_id, Counter())[player.team] += 1
+
+        team_of = {tid: votes.most_common(1)[0][0] for tid, votes in teams.items()}
+        role_of = {tid: votes.most_common(1)[0][0] for tid, votes in roles.items()}
+        for frame in stored[start:end]:
+            settled: list[PlayerState] = []
+            for player in frame.players:
+                role = role_of.get(player.track_id, player.role)
+                if role == "referee":
+                    team = "ref"
+                elif player.track_id in team_of:
+                    team = team_of[player.track_id]
+                else:
+                    team = player.team
+                if team != player.team or role != player.role:
+                    player = replace(player, team=team, role=role)
+                settled.append(player)
+            frame.players = settled
+
+    def _smooth_motion(self, stored: list[_StoredFrame], start: int, end: int) -> None:
+        """Blend held detections so markers move between analysis frames."""
+        appearances: dict[int, list[tuple[int, int]]] = {}
+        for frame_index in range(start, end):
+            for player_index, player in enumerate(stored[frame_index].players):
+                if player.offscreen:
+                    continue
+                appearances.setdefault(player.track_id, []).append((frame_index, player_index))
+
+        for hits in appearances.values():
+            knots = [0]
+            for index in range(1, len(hits)):
+                previous = stored[hits[index - 1][0]].players[hits[index - 1][1]]
+                current = stored[hits[index][0]].players[hits[index][1]]
+                if current.foot_px != previous.foot_px:
+                    knots.append(index)
+            if knots[-1] != len(hits) - 1:
+                knots.append(len(hits) - 1)
+            for left, right in zip(knots, knots[1:]):
+                start_frame = hits[left][0]
+                end_frame = hits[right][0]
+                span = end_frame - start_frame
+                if span <= 0:
+                    continue
+                start_player = stored[start_frame].players[hits[left][1]]
+                end_player = stored[end_frame].players[hits[right][1]]
+                for index in range(left + 1, right):
+                    frame_index, player_index = hits[index]
+                    blend = (frame_index - start_frame) / span
+                    player = stored[frame_index].players[player_index]
+                    stored[frame_index].players[player_index] = replace(
+                        player,
+                        bbox=_lerp_box(start_player.bbox, end_player.bbox, blend),
+                        center_px=_lerp_point(start_player.center_px, end_player.center_px, blend),
+                        foot_px=_lerp_point(start_player.foot_px, end_player.foot_px, blend),
+                        pitch_xy=_lerp_pitch(start_player.pitch_xy, end_player.pitch_xy, blend),
+                    )
+
+        ball_hits = [
+            frame_index
+            for frame_index in range(start, end)
+            if stored[frame_index].ball is not None
+            and stored[frame_index].ball.center_px is not None
+        ]
+        ball_knots = [0]
+        for index in range(1, len(ball_hits)):
+            previous = stored[ball_hits[index - 1]].ball
+            current = stored[ball_hits[index]].ball
+            if current is None or previous is None or current.center_px != previous.center_px:
+                ball_knots.append(index)
+        if ball_hits and ball_knots[-1] != len(ball_hits) - 1:
+            ball_knots.append(len(ball_hits) - 1)
+        for left, right in zip(ball_knots, ball_knots[1:]):
+            start_frame = ball_hits[left]
+            end_frame = ball_hits[right]
+            span = end_frame - start_frame
+            if span <= 0:
+                continue
+            start_ball = stored[start_frame].ball
+            end_ball = stored[end_frame].ball
+            if start_ball is None or end_ball is None:
+                continue
+            for frame_index in ball_hits[left + 1 : right]:
+                ball = stored[frame_index].ball
+                if ball is None:
+                    continue
+                blend = (frame_index - start_frame) / span
+                stored[frame_index].ball = replace(
+                    ball,
+                    center_px=_lerp_point(start_ball.center_px, end_ball.center_px, blend)
+                    if start_ball.center_px and end_ball.center_px
+                    else ball.center_px,
+                    pitch_xy=_lerp_pitch(start_ball.pitch_xy, end_ball.pitch_xy, blend),
+                    is_interpolated=True,
+                )
+
+    def _settle_formations(self, stored: list[_StoredFrame], start: int, end: int) -> None:
+        """Use one formation name per team, with lines taken from each frame."""
+        detected: list[PitchState] = []
+        counts_a: Counter[str] = Counter()
+        counts_b: Counter[str] = Counter()
+        # The shape only needs a fresh clustering a few times a second.
+        # In-between frames keep those lines; the name comes from the
+        # whole segment either way.
+        step = max(1, int(config.PLAYER_STRIDE))
+        last: PitchState | None = None
+        for offset, frame in enumerate(stored[start:end]):
+            if last is None or offset % step == 0:
+                last = self._formation_engine.detect_both_teams(frame.players)
+                if last.formation_a != "—":
+                    counts_a[last.formation_a] += 1
+                if last.formation_b != "—":
+                    counts_b[last.formation_b] += 1
+            detected.append(last)
+        label_a = counts_a.most_common(1)[0][0] if counts_a else "—"
+        label_b = counts_b.most_common(1)[0][0] if counts_b else "—"
+        for frame, state in zip(stored[start:end], detected):
+            frame.pitch_state = PitchState(
+                formation_a=label_a,
+                formation_b=label_b,
+                formation_lines_a=state.formation_lines_a,
+                formation_lines_b=state.formation_lines_b,
+            )
 
     def _play_recording(
         self,

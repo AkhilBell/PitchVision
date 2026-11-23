@@ -249,11 +249,11 @@ class MainWindow(QMainWindow):
         self.video_canvas.update_frame(packet)
         self.radar_widget.update_data(packet)
 
-        # The heatmap is filled during analysis. Redrawing it on every
-        # playback frame would stall the video.
+        # The heatmap is drawn once, when playback starts. Updating the
+        # player list during playback fills the dropdown without redrawing.
         playing = self._worker is not None and self._worker.playing_back
+        self.heatmap_widget.update_players(packet.players)
         if not playing:
-            self.heatmap_widget.update_players(packet.players)
             self.heatmap_widget.update_heatmap()
 
         # Rolling-window FPS estimate.
