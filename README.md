@@ -220,7 +220,8 @@ All tunable parameters live in [`src/config.py`](src/config.py):
 | `IOU_THRESHOLD` | `0.5` | NMS IoU threshold |
 | `DEVICE` | `None` | Inference device (`"mps"`, `"cuda"`, `"cpu"`); `None` picks the fastest available |
 | `HEATMAP_REDRAW_INTERVAL_S` | `0.5` | Minimum seconds between live heatmap redraws |
-| `HEATMAP_SIGMA` | `2.5` | Gaussian blur for heatmaps |
+| `HEATMAP_RADIUS_M` | `0.9144` | Radius of a player's heat mark, 3 ft |
+| `HEATMAP_SIGMA` | `0` | Extra blur; 0 keeps the mark inside that radius |
 | `PITCH_LENGTH` | `105.0` | Pitch length in metres |
 | `PITCH_WIDTH` | `68.0` | Pitch width in metres |
 | `PLAYBACK_MAX_WIDTH` | `1280` | Width of the copy used for playback |

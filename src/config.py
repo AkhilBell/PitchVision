@@ -225,11 +225,14 @@ DEVICE: str | None = None
 """
 
 # ── Heatmap ─────────────────────────────────────────────────────────────────
-HEATMAP_GRID_RESOLUTION: tuple[int, int] = (105, 68)
-"""(cols, rows) — one grid cell per metre of pitch surface."""
+HEATMAP_GRID_RESOLUTION: tuple[int, int] = (420, 272)
+"""Cells along the length and width of the pitch (0.25 m each)."""
 
-HEATMAP_SIGMA: float = 2.5
-"""Standard deviation for the Gaussian blur applied to the heatmap."""
+HEATMAP_RADIUS_M: float = 0.9144
+"""Radius of the mark left where a player is standing, in metres (3 ft)."""
+
+HEATMAP_SIGMA: float = 0.0
+"""Extra blur in grid cells. ``0`` keeps the mark inside ``HEATMAP_RADIUS_M``."""
 
 HEATMAP_REDRAW_INTERVAL_S: float = 0.5
 """Minimum time between live heatmap redraws, in seconds."""
@@ -244,10 +247,9 @@ are ignored so the dropdown stays usable.
 HEATMAP_VMAX_FRACTION: float = 0.12
 """Share of the full clip that maps to the hottest heatmap colour.
 
-Each cell is ``frames spent there / total frames in the clip`` (after a
-light blur), so a player who pauses for a moment does not fill the map.
-``0.12`` means 12% of the clip in one area is full brightness. The scale
-is fixed for the whole video, so the picture is only complete at the end.
+The pitch stays green. A player paints a soft disc about 3 ft across,
+and that disc turns from yellow to red as they spend more time there.
+``0.12`` means 12% of the clip in one spot is full red.
 """
 
 # ── Team / identity ─────────────────────────────────────────────────────────

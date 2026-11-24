@@ -63,6 +63,7 @@ class PlayerState:
     role: str = "player"
     jersey_crop: Optional[np.ndarray] = None
     offscreen: bool = False
+    appearance: Optional[np.ndarray] = None
 
 
 @dataclass

@@ -25,7 +25,20 @@ try:
 
     matplotlib.use("QtAgg")  # Must be set before importing pyplot.
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    from matplotlib.colors import LinearSegmentedColormap
     from matplotlib.figure import Figure
+
+    # Yellow where a player has only passed through, red where they have
+    # stayed. The low end is transparent so the pitch stays green.
+    _HEAT_CMAP = LinearSegmentedColormap.from_list(
+        "pitch_heat",
+        [
+            (1.0, 0.95, 0.45, 0.0),
+            (1.0, 0.86, 0.2, 0.45),
+            (1.0, 0.45, 0.05, 0.78),
+            (0.82, 0.08, 0.05, 0.92),
+        ],
+    )
 
     _MPL_AVAILABLE = True
 except ImportError:  # pragma: no cover
@@ -72,9 +85,9 @@ class HeatmapWidget(QWidget):
         layout.addWidget(self._combo)
 
         self._scale = QLabel(
-            "Colour is share of the full clip (bright ≈ "
-            f"{HEATMAP_VMAX_FRACTION:.0%} of the video in that spot). "
-            "It finishes filling in when the clip ends."
+            "The pitch stays green. A player lights a patch about 3 ft "
+            "across: yellow as they arrive, red if they stay. Full red is "
+            f"about {HEATMAP_VMAX_FRACTION:.0%} of the clip in that spot."
         )
         self._scale.setWordWrap(True)
         layout.addWidget(self._scale)
@@ -191,7 +204,7 @@ class HeatmapWidget(QWidget):
                 shown,
                 origin="upper",
                 extent=[0, _PITCH_LENGTH, _PITCH_WIDTH, 0],
-                cmap="hot",
+                cmap=_HEAT_CMAP,
                 alpha=0.9,
                 aspect="auto",
                 vmin=0.0,
@@ -228,13 +241,21 @@ class HeatmapWidget(QWidget):
 
         if role == "referee":
             return f"Ref #{tid}"
+        number = _squad_number(team, tid)
         if role == "goalkeeper":
             if team in ("A", "B"):
-                return f"GK #{tid} (Team {team})"
-            return f"GK #{tid}"
+                return f"GK #{number} (Team {team})"
+            return f"GK #{number}"
         if team in ("A", "B"):
-            return f"Team {team} #{tid}"
+            return f"Team {team} #{number}"
         return f"Player #{tid}"
+
+
+def _squad_number(team: str, track_id: int) -> int:
+    """Show each team as players 1–11. Team B is stored as ids 12–22."""
+    if team == "B" and track_id > 11:
+        return track_id - 11
+    return track_id
 
     def _draw_pitch_outline(self) -> None:
         """Draw the full pitch, including both penalty areas and the D."""

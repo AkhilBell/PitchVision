@@ -48,6 +48,7 @@ from src.vision.ball_tracker import BallTracker
 from src.vision.detector import PlayerDetector
 from src.vision.homography import HomographyTransformer
 from src.vision.pitch_keypoints import PitchKeypointDetector
+from src.vision.player_roster import PlayerRoster, jersey_appearance
 from src.vision.team_classifier import TeamClassifier
 
 logger = logging.getLogger(__name__)
@@ -361,14 +362,6 @@ class PipelineWorker(QThread):
                 # the opening frames can carry the same shape as the rest.
                 pitch_state = PitchState()
 
-                # One count per video frame, on-screen players only, and
-                # only while the camera is calibrated. Dividing by the
-                # full clip length later makes this a time share.
-                if pitch_calibrated:
-                    self._heatmap_engine.update(
-                        [p for p in players if not getattr(p, "offscreen", False)]
-                    )
-
                 if playback_writer is not None:
                     playback_writer.write(
                         cv2.resize(frame, playback_size, interpolation=cv2.INTER_LINEAR)
@@ -456,6 +449,8 @@ class PipelineWorker(QThread):
             self._settle_identities(stored, start, end)
             self._smooth_motion(stored, start, end)
             self._settle_formations(stored, start, end)
+        self._bind_roster(stored, segments)
+        self._rebuild_heatmap(stored)
 
     def _settle_identities(self, stored: list[_StoredFrame], start: int, end: int) -> None:
         """Give every appearance of a track the team and role it ended up with."""
@@ -589,6 +584,31 @@ class PipelineWorker(QThread):
                 formation_lines_a=state.formation_lines_a,
                 formation_lines_b=state.formation_lines_b,
             )
+
+    def _bind_roster(self, stored: list[_StoredFrame], segments: list[int]) -> None:
+        """Give each real player one id for the whole clip.
+
+        Tracker numbers restart when someone leaves the frame. Matching
+        the shirt pattern to the 22-player roster keeps their heatmap in
+        one place. Referees are not part of that roster.
+        """
+        roster = PlayerRoster()
+        bounds = [*segments, len(stored)]
+        for start, end in zip(bounds, bounds[1:]):
+            if end <= start:
+                continue
+            roster.begin_segment()
+            for frame in stored[start:end]:
+                roster.assign(frame.players)
+
+    def _rebuild_heatmap(self, stored: list[_StoredFrame]) -> None:
+        """Fill the heatmap once ids and teams are settled."""
+        self._heatmap_engine.reset()
+        self._heatmap_engine.set_clip_frames(max(1, len(stored)))
+        for frame in stored:
+            if not frame.pitch_calibrated:
+                continue
+            self._heatmap_engine.update(frame.players)
 
     def _play_recording(
         self,
@@ -771,6 +791,10 @@ class PipelineWorker(QThread):
 
         if run_players and players:
             self._assign_goalkeeper_teams(players)
+            for player in players:
+                if player.role == "referee":
+                    continue
+                player.appearance = jersey_appearance(frame, player.bbox)
         return players, ball, pitch_calibrated
 
     def _roster_with_offscreen(
