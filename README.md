@@ -223,6 +223,7 @@ All tunable parameters live in [`src/config.py`](src/config.py):
 | `HEATMAP_SIGMA` | `2.5` | Gaussian blur for heatmaps |
 | `PITCH_LENGTH` | `105.0` | Pitch length in metres |
 | `PITCH_WIDTH` | `68.0` | Pitch width in metres |
+| `PLAYBACK_MAX_WIDTH` | `1280` | Width of the copy used for playback |
 | `PLAYBACK_FPS` | `30` | Replay speed after analysis, capped by the file |
 | `PLAYER_STRIDE` | `3` | Run player tracking every Nth frame |
 | `PITCH_STRIDE` | `15` | Re-estimate the pitch every Nth frame |

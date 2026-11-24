@@ -135,6 +135,10 @@ class FramePacket:
         ``True`` when this frame has a fresh pitch → pixel homography
         from detected landmarks.  When ``False``, radar and heatmap
         should freeze and ``pitch_xy`` values stay empty.
+    display_scale : float
+        Multiply stored pixel coordinates by this to land on
+        ``raw_frame``. ``1`` when the frame is the original size; smaller
+        when playback is showing a reduced copy.
     """
 
     frame_index: int
@@ -145,3 +149,4 @@ class FramePacket:
     pitch_state: Optional[PitchState] = None
     homography_matrix: Optional[np.ndarray] = None
     pitch_calibrated: bool = False
+    display_scale: float = 1.0

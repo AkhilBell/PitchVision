@@ -17,13 +17,14 @@ VideoExporter
 from __future__ import annotations
 
 import logging
+import tempfile
 from pathlib import Path
 from typing import Generator
 
 import cv2
 import numpy as np
 
-from src.config import VIDEO_EXPORT_CODEC
+from src.config import PLAYBACK_MAX_WIDTH, VIDEO_EXPORT_CODEC
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,44 @@ def get_video_properties(video_path: str) -> dict:
         }
     finally:
         cap.release()
+
+
+def open_playback_writer(
+    width: int, height: int, fps: float
+) -> tuple[cv2.VideoWriter | None, str, float, tuple[int, int]]:
+    """Open a smaller video the replay can read without the original file.
+
+    The caller writes one resized frame per source frame while it is
+    already decoding for analysis, so playback does not decode the
+    broadcast file a second time.
+
+    Returns
+    -------
+    tuple
+        ``(writer, path, display_scale, (out_width, out_height))``.
+        ``writer`` is ``None`` when the source is already small enough
+        or the file could not be opened. ``display_scale`` converts
+        original pixel coordinates onto the playback frame.
+    """
+    if width <= PLAYBACK_MAX_WIDTH or width <= 0 or height <= 0:
+        return None, "", 1.0, (width, height)
+
+    scale = PLAYBACK_MAX_WIDTH / float(width)
+    out_w = PLAYBACK_MAX_WIDTH
+    out_h = max(2, int(round(height * scale)) // 2 * 2)
+    dest = Path(tempfile.gettempdir()) / "pitchvision-playback.mp4"
+    writer = cv2.VideoWriter(
+        str(dest),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        float(fps or 25.0),
+        (out_w, out_h),
+    )
+    if not writer.isOpened():
+        writer.release()
+        logger.info("Could not open a playback copy; frames will be shrunk while playing")
+        return None, "", scale, (out_w, out_h)
+    logger.info("Recording a %dx%d playback copy", out_w, out_h)
+    return writer, str(dest), scale, (out_w, out_h)
 
 
 class VideoExporter:

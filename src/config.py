@@ -308,6 +308,13 @@ keep accumulating for them.
 MAX_FPS: int = 30
 """Maximum frames-per-second for real-time playback."""
 
+PLAYBACK_MAX_WIDTH: int = 1280
+"""Width of the copy used for playback.
+
+The analysis still reads the original file. The replay is a smaller copy,
+so the window can hold 24–30 fps instead of drawing every full-size frame.
+"""
+
 PLAYBACK_FPS: float = 30.0
 """Target rate for the replay after analysis, capped by the file's own rate.
 

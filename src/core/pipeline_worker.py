@@ -39,7 +39,11 @@ from src.core.packet import (
     PitchState,
     PlayerState,
 )
-from src.core.video_io import frame_generator, get_video_properties
+from src.core.video_io import (
+    frame_generator,
+    get_video_properties,
+    open_playback_writer,
+)
 from src.vision.ball_tracker import BallTracker
 from src.vision.detector import PlayerDetector
 from src.vision.homography import HomographyTransformer
@@ -209,6 +213,7 @@ class PipelineWorker(QThread):
         self._cached_matrix: Optional[np.ndarray] = None
         self._cached_pitch: Optional[PitchState] = None
         self._playing_back: bool = False
+        self._playback_writer: cv2.VideoWriter | None = None
         self._is_scene_cut_frame: bool = False
 
     # ── Public API ──────────────────────────────────────────────────────
@@ -276,6 +281,13 @@ class PipelineWorker(QThread):
             ball_stride = max(player_stride, int(config.BALL_STRIDE))
             hold_frames = max(1, int(config.OFFSCREEN_HOLD_S * source_fps))
             self._heatmap_engine.set_clip_frames(total_frames)
+            (
+                playback_writer,
+                playback_path,
+                display_scale,
+                playback_size,
+            ) = open_playback_writer(int(props["width"]), int(props["height"]), source_fps)
+            self._playback_writer = playback_writer
 
             self.status.emit("Loading the analysis models…")
             self._load_models()
@@ -357,6 +369,11 @@ class PipelineWorker(QThread):
                         [p for p in players if not getattr(p, "offscreen", False)]
                     )
 
+                if playback_writer is not None:
+                    playback_writer.write(
+                        cv2.resize(frame, playback_size, interpolation=cv2.INTER_LINEAR)
+                    )
+
                 matrix = self._cached_matrix if pitch_calibrated else None
                 stored.append(
                     self._snapshot(roster, ball, pitch_state, matrix, pitch_calibrated)
@@ -373,10 +390,22 @@ class PipelineWorker(QThread):
                     last_preview = now
                 self.progress.emit(frame_index, total_frames)
 
+            wrote_proxy = playback_writer is not None
+            if playback_writer is not None:
+                playback_writer.release()
+                self._playback_writer = None
+
             if self._running and stored:
                 self.status.emit("Finishing teams and formations…")
                 self._compose_recording(stored, segments)
-                self._play_recording(stored, source_fps, total_frames)
+                self._play_recording(
+                    stored,
+                    source_fps,
+                    total_frames,
+                    playback_path or self.video_path,
+                    display_scale,
+                    not wrote_proxy and display_scale < 0.999,
+                )
 
         except FileNotFoundError as exc:
             self.error.emit(str(exc))
@@ -384,6 +413,10 @@ class PipelineWorker(QThread):
             logger.exception("PipelineWorker encountered an error")
             self.error.emit(f"Pipeline error: {exc}")
         finally:
+            writer = getattr(self, "_playback_writer", None)
+            if writer is not None:
+                writer.release()
+                self._playback_writer = None
             # QThread emits its built-in ``finished`` signal when run() returns.
             logger.info("PipelineWorker finished")
 
@@ -562,6 +595,9 @@ class PipelineWorker(QThread):
         stored: list[_StoredFrame],
         source_fps: float,
         total_frames: int,
+        play_path: str,
+        display_scale: float,
+        shrink_frames: bool,
     ) -> None:
         """Replay the video at full speed using the recorded analysis."""
         target_fps = min(float(config.PLAYBACK_FPS), float(config.MAX_FPS), source_fps)
@@ -569,13 +605,19 @@ class PipelineWorker(QThread):
         self._playing_back = True
         self.playback_started.emit()
         self.status.emit(f"Playing at {target_fps:.0f} fps")
-        for frame_index, timestamp_ms, frame in frame_generator(self.video_path):
+        for frame_index, timestamp_ms, frame in frame_generator(play_path):
             if not self._running or frame_index >= len(stored):
                 break
             while self._paused and self._running:
                 self.msleep(50)
             if not self._running:
                 break
+            if shrink_frames:
+                target_w = max(2, int(round(frame.shape[1] * display_scale)))
+                target_h = max(2, int(round(frame.shape[0] * display_scale)))
+                frame = cv2.resize(
+                    frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR
+                )
             snap = stored[frame_index]
             started = time.monotonic()
             self.frame_ready.emit(
@@ -588,6 +630,7 @@ class PipelineWorker(QThread):
                     pitch_state=snap.pitch_state,
                     homography_matrix=snap.homography_matrix,
                     pitch_calibrated=snap.pitch_calibrated,
+                    display_scale=display_scale,
                 )
             )
             self.progress.emit(frame_index, total_frames)

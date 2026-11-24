@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPolygon
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPixmap, QPolygon
 from PySide6.QtWidgets import QWidget
 
 from src.config import (
@@ -48,6 +48,9 @@ class RadarWidget(QWidget):
 
         # Overlay toggle.
         self.show_formations: bool = True
+        # The pitch picture does not change between frames.
+        self._field: QPixmap | None = None
+        self._field_size: tuple[int, int] | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -102,22 +105,10 @@ class RadarWidget(QWidget):
         """Draw the minimap."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._draw_cached_field(painter)
 
         draw_w = self.width() - 2 * _PAD
         draw_h = self.height() - 2 * _PAD - 30
-
-        # 1. Pitch background.
-        painter.setBrush(QBrush(QColor(34, 139, 34)))  # forest green
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRect(_PAD, _PAD, draw_w, draw_h)
-
-        # 2. Pitch markings (white), including both penalty areas and the D.
-        pen_white = QPen(QColor(255, 255, 255), 1.5)
-        painter.setPen(pen_white)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        for marking in pitch_markings():
-            points = [QPoint(*self._pitch_to_widget(float(x), float(y))) for x, y in marking]
-            painter.drawPolyline(QPolygon(points))
 
         # 3. Players.
         tiny_font = QFont("Arial", 7)
@@ -195,6 +186,29 @@ class RadarWidget(QWidget):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _draw_cached_field(self, painter: QPainter) -> None:
+        """Draw the pitch picture, rebuilding it only when the widget resizes."""
+        size = (self.width(), self.height())
+        if self._field is None or self._field_size != size:
+            field = QPixmap(self.size())
+            field.fill(QColor(240, 240, 240))
+            field_painter = QPainter(field)
+            field_painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            draw_w = self.width() - 2 * _PAD
+            draw_h = self.height() - 2 * _PAD - 30
+            field_painter.setPen(Qt.PenStyle.NoPen)
+            field_painter.setBrush(QBrush(QColor(34, 139, 34)))
+            field_painter.drawRect(_PAD, _PAD, draw_w, draw_h)
+            field_painter.setPen(QPen(QColor(255, 255, 255), 1.5))
+            field_painter.setBrush(Qt.BrushStyle.NoBrush)
+            for marking in pitch_markings():
+                points = [QPoint(*self._pitch_to_widget(float(x), float(y))) for x, y in marking]
+                field_painter.drawPolyline(QPolygon(points))
+            field_painter.end()
+            self._field = field
+            self._field_size = size
+        painter.drawPixmap(0, 0, self._field)
 
     def _draw_formation_lines(
         self,

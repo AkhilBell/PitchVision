@@ -72,7 +72,7 @@ class VideoCanvas(QWidget):
         if target_w >= 160 and annotated.shape[1] > target_w:
             target_h = max(1, int(round(annotated.shape[0] * (target_w / annotated.shape[1]))))
             annotated = cv2.resize(
-                annotated, (target_w, target_h), interpolation=cv2.INTER_AREA
+                annotated, (target_w, target_h), interpolation=cv2.INTER_LINEAR
             )
         self._pixmap = self._numpy_to_pixmap(annotated)
         self.update()  # schedule paintEvent
@@ -97,6 +97,10 @@ class VideoCanvas(QWidget):
             Annotated BGR image.
         """
         vis = frame.copy()
+        scale = float(getattr(packet, "display_scale", 1.0) or 1.0)
+
+        def _at(x: float, y: float) -> tuple[int, int]:
+            return int(round(x * scale)), int(round(y * scale))
 
         # -- Players --
         players: list[Any] = getattr(packet, "players", []) or []
@@ -111,14 +115,15 @@ class VideoCanvas(QWidget):
 
             # Perspective ellipse at foot position.
             if self.show_ellipses and foot_px is not None:
-                cx, cy = int(foot_px[0]), int(foot_px[1])
-                axes = (18, 6)  # semi-major/minor in pixels
+                cx, cy = _at(foot_px[0], foot_px[1])
+                axes = (max(1, int(round(18 * scale))), max(1, int(round(6 * scale))))
                 cv2.ellipse(vis, (cx, cy), axes, 0, 0, 360, color, -1)
                 cv2.ellipse(vis, (cx, cy), axes, 0, 0, 360, (255, 255, 255), 1)
 
             # ID badge above bounding box.
             if self.show_badges and bbox is not None and track_id is not None:
-                x1, y1, x2, y2 = (int(v) for v in bbox[:4])
+                x1, y1 = _at(bbox[0], bbox[1])
+                x2, y2 = _at(bbox[2], bbox[3])
                 label = str(track_id)
                 if getattr(player, "role", "player") == "goalkeeper":
                     label += " GK"
@@ -148,10 +153,14 @@ class VideoCanvas(QWidget):
         if self.show_ball and ball is not None:
             ball_px = getattr(ball, "center_px", None)
             if ball_px is not None:
-                bx, by = int(ball_px[0]), int(ball_px[1])
+                bx, by = _at(ball_px[0], ball_px[1])
                 # Small downward-pointing triangle marker.
                 tri_pts = np.array(
-                    [[bx, by - 14], [bx - 7, by - 22], [bx + 7, by - 22]],
+                    [
+                        [bx, by - max(4, int(round(14 * scale)))],
+                        [bx - max(2, int(round(7 * scale))), by - max(6, int(round(22 * scale)))],
+                        [bx + max(2, int(round(7 * scale))), by - max(6, int(round(22 * scale)))],
+                    ],
                     dtype=np.int32,
                 )
                 cv2.fillPoly(vis, [tri_pts], BALL_COLOR)
@@ -159,12 +168,14 @@ class VideoCanvas(QWidget):
 
         # -- Projected pitch lines (debug) --
         if self.show_pitch_lines and getattr(packet, "pitch_calibrated", False):
-            self._draw_pitch_lines(vis, getattr(packet, "homography_matrix", None))
+            self._draw_pitch_lines(
+                vis, getattr(packet, "homography_matrix", None), scale
+            )
 
         return vis
 
     def _draw_pitch_lines(
-        self, vis: np.ndarray, matrix: np.ndarray | None
+        self, vis: np.ndarray, matrix: np.ndarray | None, scale: float = 1.0
     ) -> None:
         """Project pitch marking segments onto *vis* via the inverse homography."""
         if matrix is None:
@@ -184,15 +195,24 @@ class VideoCanvas(QWidget):
             p2 = transformer.pitch_to_pixel(PITCH_LANDMARKS_M[j])
             if p1 is None or p2 is None:
                 continue
+            x1, y1 = p1[0] * scale, p1[1] * scale
+            x2, y2 = p2[0] * scale, p2[1] * scale
             # Skip segments that land entirely off-frame (common on close-ups).
             if (
-                (p1[0] < -width and p2[0] < -width)
-                or (p1[0] > 2 * width and p2[0] > 2 * width)
-                or (p1[1] < -height and p2[1] < -height)
-                or (p1[1] > 2 * height and p2[1] > 2 * height)
+                (x1 < -width and x2 < -width)
+                or (x1 > 2 * width and x2 > 2 * width)
+                or (y1 < -height and y2 < -height)
+                or (y1 > 2 * height and y2 > 2 * height)
             ):
                 continue
-            cv2.line(vis, p1, p2, PITCH_LINE_COLOR, 2, cv2.LINE_AA)
+            cv2.line(
+                vis,
+                (int(round(x1)), int(round(y1))),
+                (int(round(x2)), int(round(y2))),
+                PITCH_LINE_COLOR,
+                2,
+                cv2.LINE_AA,
+            )
 
     @staticmethod
     def _team_color(team: str | None) -> tuple[int, int, int]:
